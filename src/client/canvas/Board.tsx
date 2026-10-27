@@ -66,14 +66,14 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
       pendingSelect.current = null;
       setTimeout(() => labelRef.current?.select(), 30);
     }
-    if (before.size === 0) setTimeout(() => rf.fitView({ padding: 0.25, duration: 400 }), 60);
+    if (before.size === 0) setTimeout(() => rf.fitView({ padding: 0.25, duration: 400, maxZoom: 1 }), 60);
     return () => clearTimeout(t);
   }, [diagram.nodes, rf]);
 
   /* When the AI finishes a turn, make sure its work is in view. */
   const wasBusy = useRef(false);
   useEffect(() => {
-    if (wasBusy.current && !state.aiBusy && diagram.nodes.length) rf.fitView({ padding: 0.25, duration: 400 });
+    if (wasBusy.current && !state.aiBusy && diagram.nodes.length) rf.fitView({ padding: 0.25, duration: 400, maxZoom: 1 });
     wasBusy.current = !!state.aiBusy;
   }, [state.aiBusy, diagram.nodes.length, rf]);
 
@@ -303,10 +303,9 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
           nodesDraggable={canEdit}
           nodesConnectable={canEdit}
           fitView
-          fitViewOptions={{ padding: 0.25 }}
+          fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
           minZoom={0.2}
           maxZoom={2}
-          proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--grid)" />
           <Controls showInteractive={false} />
