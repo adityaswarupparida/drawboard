@@ -15,7 +15,7 @@
       "binding": "DB",
       "database_name": "drawboard-db",
       // Replace with the id printed by `npx wrangler d1 create drawboard-db` before deploying.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "def6c4b9-885b-48d3-a022-72e9f78c7cc4",
       "migrations_dir": "migrations"
     }
   ],
