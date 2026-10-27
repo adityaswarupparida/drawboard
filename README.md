@@ -27,21 +27,29 @@ Describe a system ("Design a URL shortener for 100M links a month") by typing or
 ## Architecture
 
 ```
-Browser (React + React Flow)
-   │  REST /api/*            WebSocket /agents/canvas-agent/:projectId
-   ▼                          ▼
-Worker (Hono) ── Better Auth session check ── D1 (users, workspaces, projects, roles, invites)
-   │                          │ role checked here, identity passed in trusted headers
-   │                          ▼
-   │                    CanvasAgent (Durable Object, one per project)
-   │                     • validates ops, applies them, broadcasts state
-   │                     • chat, history, undo snapshots in SQLite
-   │                     • AI turn: Llama 3.3 → ops → replayed live
-   │                     • walkthroughs: request-order stops, explanations streamed, cached per diagram
-   │                     • voice calls: Flux STT ─► AI turn ─► Aura-2 TTS
-   │                     • starts ──► DesignReviewWorkflow (4 durable steps)
-   │                                        └─ writes findings back via RPC
-   └── /api/projects/:id/speak ──► Aura-2 (walkthrough narration)
+Browser  (React + React Flow)
+   │
+   │  REST /api/*                      WebSocket /agents/canvas-agent/:projectId
+   ▼                                    ▼
+Worker  (Hono)  ──  Better Auth session check  ──►  D1
+   │                                    │            users, workspaces, projects,
+   │                                    │            roles, invites
+   │                                    │
+   │                                    │  role checked here,
+   │                                    │  identity passed in trusted headers
+   │                                    ▼
+   │                              CanvasAgent  (Durable Object, one per project)
+   │
+   │                                • validates edits, applies them, broadcasts state
+   │                                • chat, history and undo snapshots in SQLite
+   │                                • AI turns: Llama 3.3 → edits, replayed live
+   │                                • walkthroughs: streamed, cached per diagram
+   │                                • voice calls: Flux STT → AI turn → Aura-2 TTS
+   │
+   │                                starts  ──►  DesignReviewWorkflow
+   │                                             4 durable steps, findings back via RPC
+   │
+   └──  /api/projects/:id/speak  ──►  Aura-2  (walkthrough narration)
 ```
 
 Key design choice: the AI never rewrites the whole diagram. It returns a list of small edits (`add_node`, `connect`, `update_node`, `remove_node`, …) that go through the same validation as human edits (`src/shared/apply.ts`). Invalid edits are skipped and reported, positions come from a deterministic auto-layout, and the shared Zod schema (`src/shared/diagram.ts`) is used by the browser, the server and the AI path.
