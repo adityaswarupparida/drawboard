@@ -30,14 +30,15 @@ interface Props {
   presence: Presence[];
   cursors: Record<string, XY>;
   remoteDrags: Record<string, XY>;
+  selNodes: string[];
+  setSelNodes: React.Dispatch<React.SetStateAction<string[]>>;
 }
 
-export function Board({ state, canEdit, connected, send, presence, cursors, remoteDrags }: Props) {
+export function Board({ state, canEdit, connected, send, presence, cursors, remoteDrags, selNodes, setSelNodes }: Props) {
   const rf = useReactFlow();
   const wrapRef = useRef<HTMLDivElement>(null);
   const diagram = state.diagram;
   const [localPos, setLocalPos] = useState<Record<string, XY>>({});
-  const [selNodes, setSelNodes] = useState<string[]>([]);
   const [selEdges, setSelEdges] = useState<string[]>([]);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const [addKind, setAddKind] = useState<NodeKind>("service");
@@ -68,7 +69,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
     }
     if (before.size === 0) setTimeout(() => rf.fitView({ padding: 0.25, duration: 400, maxZoom: 1 }), 60);
     return () => clearTimeout(t);
-  }, [diagram.nodes, rf]);
+  }, [diagram.nodes, rf, setSelNodes]);
 
   /* When the AI finishes a turn, make sure its work is in view. */
   const wasBusy = useRef(false);
@@ -94,7 +95,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
     // Forget selections of things that no longer exist.
     setSelNodes((s) => s.filter((id) => diagram.nodes.some((n) => n.id === id)));
     setSelEdges((s) => s.filter((id) => diagram.edges.some((e) => e.id === id)));
-  }, [diagram]);
+  }, [diagram, setSelNodes]);
 
   const nodes: DiagramFlowNode[] = useMemo(() => {
     const ann = new Map<string, CanvasState["annotations"][number]>();
@@ -162,7 +163,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
         }
       }
     },
-    [sendDrag],
+    [sendDrag, setSelNodes],
   );
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {

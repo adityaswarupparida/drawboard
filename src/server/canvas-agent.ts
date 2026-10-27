@@ -1,6 +1,6 @@
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import { nanoid } from "nanoid";
-import { applyOps, summarize } from "../shared/apply";
+import { applyOps, slug, summarize } from "../shared/apply";
 import { emptyDiagram, OpListSchema, type AuthorRef, type Diagram, type Op, type Severity } from "../shared/diagram";
 import { layeredLayout } from "../shared/layout";
 import {
@@ -17,7 +17,7 @@ import {
   type Role,
   type ServerMessage,
 } from "../shared/protocol";
-import { runDesignTurn } from "./ai";
+import { connectIsolated, runChatTurn, verifyDesign } from "./ai";
 import type { Env } from "./env";
 
 type ConnState = { userId: string; name: string; role: Role; color: string };
@@ -136,7 +136,7 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
           return;
         }
         // Don't block this socket's message loop on the model call.
-        this.ctx.waitUntil(this.runAiTurn(author, text));
+        this.ctx.waitUntil(this.runAiTurn(author, text, Array.isArray(msg.selection) ? msg.selection.filter((x): x is string => typeof x === "string") : []));
         return;
       }
       case "review":
@@ -180,94 +180,195 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
 
   /* ---------------- AI ---------------- */
 
-  private async runAiTurn(author: AuthorRef, text: string) {
+  private async runAiTurn(author: AuthorRef, text: string, selectionIds: string[] = []) {
     const now = Date.now();
-    this.upsertChat({ id: nanoid(10), role: "user", author, text, createdAt: now });
-    const aiMsg: ChatMessage = { id: nanoid(10), role: "ai", author: AI_AUTHOR, text: "", ops: [], status: "thinking", createdAt: now + 1 };
+    const before = this.state.diagram;
+    const selection = selectionIds
+      .map((id) => before.nodes.find((n) => n.id === id))
+      .filter((n): n is NonNullable<typeof n> => !!n)
+      .slice(0, 20)
+      .map((n) => ({ id: n.id, label: n.label }));
+    this.upsertChat({
+      id: nanoid(10),
+      role: "user",
+      author,
+      text,
+      context: selection.length ? `About: ${selection.map((s) => s.label).join(", ")}` : undefined,
+      createdAt: now,
+    });
+    const aiMsg: ChatMessage = { id: nanoid(10), role: "ai", author: AI_AUTHOR, text: "", ops: [], status: "thinking", phase: "Reading the diagram", createdAt: now + 1 };
     this.upsertChat(aiMsg);
     this.setState({ ...this.state, aiBusy: { for: author.name }, highlights: {} });
+
+    // Everything the AI changes this turn goes into one undo step.
+    const startedEmpty = before.nodes.length === 0;
+    const added = new Set<string>();
+    const idMap = new Map<string, string>();
+    const lines: string[] = [];
+    const skipped: string[] = [];
+    let snapshotSeq: number | null = null;
+
+    const applyAi = (op: Op) => {
+      if (snapshotSeq === null) snapshotSeq = this.pushSnapshot(before, "AI edits", AI_AUTHOR.name);
+      const remap = (ref: string) => idMap.get(ref) ?? ref;
+      let step: Op = op;
+      if (op.type === "connect") step = { ...op, source: remap(op.source), target: remap(op.target) };
+      else if (op.type === "update_node" || op.type === "remove_node" || op.type === "move_node") step = { ...op, id: remap(op.id) };
+      const r = applyOps(this.state.diagram, [step], AI_AUTHOR, { lenient: true, newId });
+      skipped.push(...r.errors);
+      const newId0 = r.addedNodeIds[0];
+      if (op.type === "add_node" && newId0) {
+        if (op.id) idMap.set(op.id, newId0);
+        idMap.set(op.label, newId0);
+        added.add(newId0);
+      }
+      if (!r.changed) return;
+      let d = r.diagram;
+      // On a blank canvas, keep the whole drawing laid out as it grows.
+      if (startedEmpty) d = withLayout(d);
+      this.setDiagram(d, this.state.undo);
+      lines.push(...r.lines);
+      aiMsg.ops = [...lines];
+      aiMsg.phase = "Drawing";
+      this.upsertChatThrottled(aiMsg);
+    };
 
     try {
       const pending = this.sql<{ seq: number; text: string }>`SELECT * FROM pending_changes ORDER BY seq`;
       const maxSeq = pending.length ? pending[pending.length - 1]!.seq : 0;
-      const result = await runDesignTurn(this.env.AI, {
-        diagram: this.state.diagram,
-        chat: this.loadChat(30).filter((m) => m.id !== aiMsg.id),
-        humanChanges: pending.map((p) => p.text),
-        userName: author.name,
-        text,
-      });
+      const result = await runChatTurn(
+        this.env.AI,
+        {
+          diagram: before,
+          chat: this.loadChat(30).filter((m) => m.id !== aiMsg.id),
+          humanChanges: pending.map((p) => p.text),
+          userName: author.name,
+          text,
+          selection,
+        },
+        {
+          onOp: applyAi,
+          onReply: (t) => {
+            aiMsg.text = t;
+            aiMsg.phase = undefined;
+            this.upsertChatThrottled(aiMsg);
+          },
+        },
+      );
       this.sql`DELETE FROM pending_changes WHERE seq <= ${maxSeq}`;
+      skipped.push(...result.rejected);
+      aiMsg.text = result.reply;
 
-      const before = this.state.diagram;
-      let applied = 0;
-      const skipped: string[] = [...result.rejected];
-
-      if (result.ops.length) {
-        // Work out final positions from the whole batch, then play the edits
-        // one by one so everyone watches the diagram being drawn.
-        const finalRun = applyOps(before, result.ops, AI_AUTHOR, { lenient: true, newId });
-        const finalNodes = finalRun.addedNodeIds.map((id) => finalRun.diagram.nodes.find((n) => n.id === id)!);
-        this.pushSnapshot(before, summarize(finalRun.lines), AI_AUTHOR.name);
-
-        const idMap = new Map<string, string>();
-        const remap = (ref: string) => idMap.get(ref) ?? ref;
-        let addIndex = 0;
-        for (const op of result.ops) {
-          let step: Op = op;
-          if (op.type === "add_node") {
-            const pos = finalNodes[addIndex++];
-            step = { ...op, x: pos?.x, y: pos?.y };
-          } else if (op.type === "connect") step = { ...op, source: remap(op.source), target: remap(op.target) };
-          else if (op.type === "update_node" || op.type === "remove_node") step = { ...op, id: remap(op.id) };
-
-          const r = applyOps(this.state.diagram, [step], AI_AUTHOR, { lenient: true, newId });
-          skipped.push(...r.errors);
-          if (op.type === "add_node" && r.addedNodeIds[0]) {
-            if (op.id) idMap.set(op.id, r.addedNodeIds[0]);
-            idMap.set(op.label, r.addedNodeIds[0]);
-          }
-          if (!r.changed) continue;
-          applied++;
-          this.setDiagram(r.diagram, this.state.undo);
-          aiMsg.ops = [...(aiMsg.ops ?? []), ...r.lines];
-          this.upsertChat(aiMsg);
-          await sleep(AI_STEP_MS);
-        }
-        if (applied) {
-          const summary = summarize(aiMsg.ops ?? []);
-          this.setState({ ...this.state, undo: { summary, by: AI_AUTHOR.name } });
-          this.addHistory(AI_AUTHOR, summary);
-        } else {
-          // Nothing applied: drop the snapshot we just pushed.
-          this.sql`DELETE FROM snapshots WHERE seq = (SELECT MAX(seq) FROM snapshots)`;
-        }
+      // Second look at what was just drawn.
+      let checkNote = "";
+      if (result.mode === "edit" && added.size) {
+        aiMsg.phase = "Checking my work";
+        this.upsertChat(aiMsg);
+        checkNote = await this.selfCheck(text, added, applyAi);
       }
 
       // Highlights may name boxes by id or label.
       const highlights: Record<string, Severity> = {};
       for (const [ref, sev] of Object.entries(result.highlights)) {
-        const n = this.state.diagram.nodes.find((x) => x.id === ref) ?? this.state.diagram.nodes.find((x) => x.label.toLowerCase() === ref.toLowerCase());
+        const id = idMap.get(ref) ?? ref;
+        const n = this.state.diagram.nodes.find((x) => x.id === id) ?? this.state.diagram.nodes.find((x) => x.label.toLowerCase() === ref.toLowerCase());
         if (n) highlights[n.id] = sev;
       }
 
-      aiMsg.text = result.reply;
+      const applied = lines.length;
+      if (applied) {
+        const summary = summarize(lines);
+        this.sql`UPDATE snapshots SET summary = ${summary} WHERE seq = ${snapshotSeq}`;
+        this.setState({ ...this.state, undo: { summary, by: AI_AUTHOR.name } });
+        this.addHistory(AI_AUTHOR, summary);
+      } else if (snapshotSeq !== null) {
+        this.sql`DELETE FROM snapshots WHERE seq = ${snapshotSeq}`;
+      }
+
       aiMsg.status = "done";
+      aiMsg.phase = undefined;
       aiMsg.meta = [
         "Llama 3.3",
-        applied ? `${applied} edit${applied > 1 ? "s" : ""}` : "no edits",
+        result.mode === "answer" ? "answer only" : applied ? `${applied} edit${applied > 1 ? "s" : ""}` : "no edits",
+        checkNote,
         skipped.length ? `${skipped.length} invalid edit${skipped.length > 1 ? "s" : ""} skipped` : "",
-      ].filter(Boolean).join(" · ");
+      ].filter(Boolean).join(" \u00B7 ");
       this.upsertChat(aiMsg);
       this.setState({ ...this.state, highlights });
     } catch (err) {
       console.error("AI turn failed", err);
       aiMsg.status = "error";
-      aiMsg.text = "I couldn't reach the AI model just now. Your diagram is unchanged. Try again in a moment.";
+      aiMsg.phase = undefined;
+      aiMsg.text = lines.length
+        ? "Something went wrong partway through. The edits above were applied; Undo removes them."
+        : "I couldn't reach the AI model just now. Your diagram is unchanged. Try again in a moment.";
       this.upsertChat(aiMsg);
+      if (lines.length) this.setState({ ...this.state, undo: { summary: summarize(lines), by: AI_AUTHOR.name } });
     } finally {
       this.setState({ ...this.state, aiBusy: null });
     }
+  }
+
+  /**
+   * Checks what the AI just added: merges obvious duplicates, wires up boxes it
+   * forgot to connect, and for bigger designs asks the model to review itself.
+   * Returns a short note for the message footer.
+   */
+  private async selfCheck(request: string, added: Set<string>, applyAi: (op: Op) => void): Promise<string> {
+    let fixed = 0;
+    const count = () => this.state.version;
+
+    // 1. Duplicates of boxes that already existed before this turn.
+    const d0 = this.state.diagram;
+    for (const id of [...added]) {
+      const n = d0.nodes.find((x) => x.id === id);
+      if (!n) continue;
+      const twin = d0.nodes.find((x) => x.id !== id && !added.has(x.id) && x.kind === n.kind && slug(x.label) === slug(n.label));
+      if (!twin) continue;
+      for (const e of d0.edges) {
+        if (e.source === id && e.target !== twin.id) applyAi({ type: "connect", source: twin.id, target: e.target, label: e.label });
+        if (e.target === id && e.source !== twin.id) applyAi({ type: "connect", source: e.source, target: twin.id, label: e.label });
+      }
+      applyAi({ type: "remove_node", id });
+      added.delete(id);
+      fixed++;
+    }
+
+    // 2. Boxes left unconnected.
+    const isolated = () => {
+      const d = this.state.diagram;
+      return [...added].filter((id) => d.nodes.some((n) => n.id === id) && !d.edges.some((e) => e.source === id || e.target === id));
+    };
+    if (isolated().length) {
+      try {
+        const v = count();
+        for (const op of await connectIsolated(this.env.AI, this.state.diagram, isolated())) applyAi(op);
+        if (count() !== v) fixed++;
+      } catch (e) {
+        console.warn("connect follow-up failed", e);
+      }
+    }
+
+    // 3. For whole designs, a strict second opinion from the model.
+    let note = "";
+    if (added.size >= 4) {
+      try {
+        const v = count();
+        const check = await verifyDesign(this.env.AI, request, this.state.diagram, added);
+        for (const op of check.fixes) {
+          applyAi(op);
+          await sleep(120);
+        }
+        if (count() !== v) {
+          fixed++;
+          note = check.note;
+        }
+      } catch (e) {
+        console.warn("self-check failed", e);
+      }
+    }
+    if (!fixed) return "self-check passed";
+    return note && !/looks good/i.test(note) ? `self-check: ${note.replace(/\.$/, "").toLowerCase()}` : "self-check fixed issues";
   }
 
   /* ---------------- design review (Workflow) ---------------- */
@@ -373,9 +474,11 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     );
   }
 
-  private pushSnapshot(diagram: Diagram, summary: string, byName: string) {
+  private pushSnapshot(diagram: Diagram, summary: string, byName: string): number {
     this.sql`INSERT INTO snapshots (summary, by_name, diagram) VALUES (${summary}, ${byName}, ${JSON.stringify(diagram)})`;
+    const seq = this.sql<{ seq: number }>`SELECT MAX(seq) AS seq FROM snapshots`[0]?.seq ?? 0;
     this.sql`DELETE FROM snapshots WHERE seq NOT IN (SELECT seq FROM snapshots ORDER BY seq DESC LIMIT ${MAX_SNAPSHOTS})`;
+    return seq;
   }
 
   private addHistory(by: AuthorRef, summary: string) {
@@ -386,8 +489,29 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
   }
 
   private upsertChat(message: ChatMessage) {
+    const pendingTimer = this.chatTimers.get(message.id);
+    if (pendingTimer) clearTimeout(pendingTimer);
     this.sql`INSERT OR REPLACE INTO chat (id, created_at, data) VALUES (${message.id}, ${message.createdAt}, ${JSON.stringify(message)})`;
     this.emit({ type: "chat_upsert", message });
+  }
+
+  private chatSentAt = new Map<string, number>();
+  private chatTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** For streaming updates: at most ~8 broadcasts a second per message. */
+  private upsertChatThrottled(message: ChatMessage) {
+    const last = this.chatSentAt.get(message.id) ?? 0;
+    const wait = 120 - (Date.now() - last);
+    const pendingTimer = this.chatTimers.get(message.id);
+    if (pendingTimer) clearTimeout(pendingTimer);
+    if (wait <= 0) {
+      this.chatSentAt.set(message.id, Date.now());
+      this.upsertChat({ ...message });
+    } else {
+      this.chatTimers.set(message.id, setTimeout(() => {
+        this.chatSentAt.set(message.id, Date.now());
+        this.upsertChat({ ...message });
+      }, wait));
+    }
   }
 
   private loadChat(limit = 100): ChatMessage[] {
@@ -423,4 +547,10 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
   private sendTo(conn: Connection, msg: ServerMessage) {
     conn.send(JSON.stringify(msg));
   }
+}
+
+/** Applies the automatic layout to every box (used while the AI draws on a blank canvas). */
+function withLayout(d: Diagram): Diagram {
+  const pos = layeredLayout(d.nodes, d.edges);
+  return { ...d, nodes: d.nodes.map((n) => ({ ...n, ...(pos.get(n.id) ?? {}) })) };
 }

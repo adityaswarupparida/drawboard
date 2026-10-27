@@ -49,6 +49,10 @@ export interface ChatMessage {
   ops?: string[];
   findings?: Finding[];
   status?: "thinking" | "done" | "error";
+  /** What the AI is doing right now, shown while status is "thinking". */
+  phase?: string;
+  /** Extra context for a user message, e.g. which boxes were selected. */
+  context?: string;
   meta?: string;
   createdAt: number;
 }
@@ -72,7 +76,7 @@ export interface Presence {
 
 export type ClientMessage =
   | { type: "ops"; ops: Op[] }
-  | { type: "chat"; text: string }
+  | { type: "chat"; text: string; selection?: string[] }
   | { type: "cursor"; x: number; y: number }
   | { type: "cursor_leave" }
   | { type: "drag"; id: string; x: number; y: number }

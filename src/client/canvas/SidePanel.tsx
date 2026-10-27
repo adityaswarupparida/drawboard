@@ -12,7 +12,9 @@ interface Props {
   history: HistoryEntry[];
   canEdit: boolean;
   connected: boolean;
-  onSend: (text: string) => void;
+  selection: { id: string; label: string }[];
+  onClearSelection: () => void;
+  onSend: (text: string, selection?: string[]) => void;
   onReview: () => void;
   showToast: (t: string) => void;
 }
@@ -28,7 +30,9 @@ const FULL_PROMPTS = [
   "Add caching where it helps most",
 ];
 
-export function SidePanel({ projectId, meId, state, chat, history, canEdit, connected, onSend, onReview, showToast }: Props) {
+export function SidePanel({ projectId, meId, state, chat, history, canEdit, connected, selection, onClearSelection, onSend: rawSend, onReview, showToast }: Props) {
+  // Messages are about the selected boxes, if any.
+  const onSend = (t: string) => rawSend(t, selection.length ? selection.map((s) => s.id) : undefined);
   const [tab, setTab] = useState<"chat" | "history">("chat");
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -41,7 +45,11 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
 
   const busy = !!state.aiBusy;
   const disabled = !canEdit || !connected || busy;
-  const prompts = state.diagram.nodes.length ? FULL_PROMPTS : EMPTY_PROMPTS;
+  const prompts = selection.length
+    ? [selection.length === 1 ? "Explain what this does" : "Explain how these work together", selection.length === 1 ? "What breaks if this fails?" : "Make these redundant", "What's missing around this?"]
+    : state.diagram.nodes.length
+      ? FULL_PROMPTS
+      : EMPTY_PROMPTS;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -100,6 +108,14 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
                 {voice.status === "recording" ? "Listening… click the mic again when you're done." : "Turning your voice into text…"}
               </div>
             )}
+            {selection.length > 0 && (
+              <div className="selchip">
+                <span>
+                  Asking about <b>{selection.length === 1 ? selection[0]!.label : `${selection.length} selected boxes`}</b>
+                </span>
+                <button type="button" onClick={onClearSelection} aria-label="Clear selection">Clear</button>
+              </div>
+            )}
             {busy && <div className="listen">The AI is working on {state.aiBusy!.for}'s request…</div>}
             <form onSubmit={submit}>
               <button
@@ -118,7 +134,7 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
                 value={text}
                 maxLength={2000}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Ask a question or describe a change"
+                placeholder={selection.length ? `Ask about or change ${selection.length === 1 ? selection[0]!.label : "the selected boxes"}` : "Ask a question or describe a change"}
                 aria-label="Message the AI"
                 disabled={!canEdit || !connected}
               />
@@ -150,13 +166,13 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
             {m.ops.length > 12 && <li>{m.ops.length - 12} more edit{m.ops.length - 12 === 1 ? "" : "s"}</li>}
           </ul>
         )}
-        {m.status === "thinking" && !m.text && (
+        {m.text && <p className={m.status === "thinking" && !m.phase ? "typing" : undefined}>{m.text}</p>}
+        {m.status === "thinking" && (m.phase || !m.text) && (
           <div className="think">
             <span className="dots"><i /><i /><i /></span>
-            {m.ops?.length ? "Drawing" : "Thinking"}
+            {m.phase ?? "Thinking"}…
           </div>
         )}
-        {m.text && <p>{m.text}</p>}
         {m.findings && m.findings.length > 0 && (
           <ul className="rlist">
             {m.findings.map((f, i) => (
@@ -179,6 +195,7 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
         <span>{clock(m.createdAt)}</span>
       </div>
       <p>{m.text}</p>
+      {m.context && <span className="mctx">{m.context}</span>}
     </div>
   );
 }

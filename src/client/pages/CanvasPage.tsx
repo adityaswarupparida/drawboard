@@ -44,6 +44,7 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
   const [sharing, setSharing] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(project.name);
+  const [selNodes, setSelNodes] = useState<string[]>([]);
   // The server decides the role; until it says hello, fall back to what the API reported.
   const role = me?.role ?? project.role;
   const canEdit = roleCanEdit(role);
@@ -129,6 +130,8 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
             presence={presence}
             cursors={live.cursors}
             remoteDrags={live.remoteDrags}
+            selNodes={selNodes}
+            setSelNodes={setSelNodes}
           />
           <SidePanel
             projectId={project.id}
@@ -138,7 +141,12 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
             history={live.history}
             canEdit={canEdit}
             connected={connected}
-            onSend={(text) => send({ type: "chat", text })}
+            selection={selNodes
+              .map((id) => state.diagram.nodes.find((n) => n.id === id))
+              .filter((n): n is NonNullable<typeof n> => !!n)
+              .map((n) => ({ id: n.id, label: n.label }))}
+            onClearSelection={() => setSelNodes([])}
+            onSend={(text, selection) => send({ type: "chat", text, selection })}
             onReview={() => send({ type: "review" })}
             showToast={live.showToast}
           />

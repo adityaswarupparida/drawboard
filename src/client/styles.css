@@ -177,6 +177,15 @@ select.input { width: auto; }
 .ann.critical { color: var(--crit); } .ann.warning { color: var(--warn); } .ann.tip { color: var(--tip); }
 .dnode .react-flow__handle { width: 8px; height: 8px; opacity: 0; transition: opacity 0.15s; }
 .dnode:hover .react-flow__handle, .react-flow__handle.connectingfrom, .react-flow__handle.connectingto { opacity: 1; }
+/* Boxes glide to new positions (AI layout, teammates' drags) but follow your own drag instantly. */
+.react-flow__node:not(.dragging) { transition: transform 0.35s ease; }
+.selchip { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--ink-2); background: var(--canvas); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px 4px 10px; }
+.selchip span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selchip button { border: 0; background: none; color: var(--ink-3); font-size: 0.78rem; }
+.selchip button:hover { color: var(--ink); }
+.mctx { font-size: 0.72rem; color: var(--ink-3); }
+.m p.typing::after { content: "\258D"; color: var(--ai); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
 .cursor { position: absolute; pointer-events: none; z-index: 10; transition: transform 0.08s linear; }
 .cursor span { display: inline-block; margin: 14px 0 0 10px; color: #fff; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
 .review { position: absolute; top: 56px; right: 12px; width: 250px; max-width: calc(100% - 24px); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); z-index: 5; }
