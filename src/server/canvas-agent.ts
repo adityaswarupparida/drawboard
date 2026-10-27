@@ -1,4 +1,5 @@
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
+import { WorkersAIFluxSTT, WorkersAITTS, withVoice, type VoiceTurnContext } from "agents/voice";
 import { nanoid } from "nanoid";
 import { applyOps, slug, summarize } from "../shared/apply";
 import { emptyDiagram, OpListSchema, type AuthorRef, type Diagram, type Op, type Severity } from "../shared/diagram";
@@ -17,10 +18,11 @@ import {
   type Role,
   type ServerMessage,
 } from "../shared/protocol";
-import { connectIsolated, runChatTurn, verifyDesign } from "./ai";
+import { connectIsolated, runChatTurn, verifyDesign, wantsAnswerOnly } from "./ai";
 import type { Env } from "./env";
 
-type ConnState = { userId: string; name: string; role: Role; color: string };
+// `voice` marks the second socket a browser opens for a live voice call.
+type ConnState = { userId: string; name: string; role: Role; color: string; voice?: boolean };
 
 const MAX_CHAT = 200;
 const MAX_HISTORY = 300;
@@ -30,12 +32,18 @@ const AI_STEP_MS = 170;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const newId = () => nanoid(8);
 
-/**
- * One instance per project. It owns the diagram, chat and change history, and
- * is the single source of truth: every edit (human or AI) is validated here
- * and then broadcast to everyone connected.
- */
-export class CanvasAgent extends Agent<Env, CanvasState> {
+const isVoiceRequest = (req: Request) => new URL(req.url).searchParams.get("voice") === "1";
+
+// The voice mixin is marked experimental upstream, so `agents` is pinned to an exact version.
+const VoiceAgent = withVoice(Agent);
+
+export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
+  // Flux does its own turn detection; keyterms help it spell architecture jargon.
+  transcriber = new WorkersAIFluxSTT(this.env.AI, {
+    keyterms: ["Postgres", "Redis", "Kafka", "CDN", "load balancer", "API gateway", "WebSocket", "Cassandra", "S3", "R2", "D1"],
+  });
+  tts = new WorkersAITTS(this.env.AI, { speaker: "asteria" });
+
   initialState: CanvasState = {
     diagram: emptyDiagram(),
     annotations: [],
@@ -51,17 +59,16 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     this.sql`CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS snapshots (seq INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT NOT NULL, by_name TEXT NOT NULL, diagram TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS pending_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)`;
-    // If the object restarted mid AI turn, clear the stale "AI is working" flag.
+    // A restart mid AI turn would otherwise leave the "AI is working" flag stuck.
     if (this.state.aiBusy) this.setState({ ...this.state, aiBusy: null });
   }
 
-  /** Clients never write state directly; all changes arrive as validated messages. */
+  // Clients never write state directly; edits must arrive as validated ops.
   validateStateChange(_next: CanvasState, source: Connection | "server") {
     if (source !== "server") throw new Error("Edits must be sent as ops");
   }
 
-  /* ---------------- connections ---------------- */
-
+  // Overridden as prototype methods (not arrow fields) so the voice mixin's wrappers still run.
   onConnect(conn: Connection<ConnState>, ctx: ConnectionContext) {
     const h = ctx.request.headers;
     const userId = h.get("x-user-id");
@@ -71,7 +78,9 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
       return;
     }
     const name = decodeURIComponent(h.get("x-user-name") ?? "Someone");
-    conn.setState({ userId, name, role, color: colorFor(userId) });
+    const voice = isVoiceRequest(ctx.request);
+    conn.setState({ userId, name, role, color: colorFor(userId), voice });
+    if (voice) return;
     this.sendTo(conn, {
       type: "hello",
       you: this.presenceOf(conn)!,
@@ -81,7 +90,12 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     this.broadcastPresence();
   }
 
+  shouldSendProtocolMessages(_conn: Connection, ctx: ConnectionContext) {
+    return !isVoiceRequest(ctx.request);
+  }
+
   onClose(conn: Connection<ConnState>) {
+    if (conn.state?.voice) return;
     this.emit({ type: "cursor_leave", connectionId: conn.id }, [conn.id]);
     this.broadcastPresence(conn.id);
   }
@@ -144,6 +158,29 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     }
   }
 
+  beforeCallStart(conn: Connection<ConnState>) {
+    return !!conn.state && canEdit(conn.state.role);
+  }
+
+  afterTranscribe(text: string) {
+    return text.trim().length < 3 ? null : text;
+  }
+
+  async onTurn(text: string, ctx: VoiceTurnContext) {
+    const me = (ctx.connection as Connection<ConnState>).state;
+    // text_message skips beforeCallStart, so the role check is repeated here.
+    if (!me || !canEdit(me.role)) return "You have view-only access, so I can't change this diagram.";
+    if (this.state.aiBusy) return `I'm still working on ${this.state.aiBusy.for}'s request. Ask me again in a moment.`;
+    const run = () => this.runAiTurn({ id: me.userId, name: me.name }, text);
+    const filler = wantsAnswerOnly(text) ? "Let me take a look. " : "On it, drawing that now. ";
+    // The filler must end in ". " and be 10+ chars or the TTS splitter holds it until the end.
+    // ctx.signal is ignored: an interruption should stop the speech, not half-finish the edits.
+    return (async function* () {
+      yield filler;
+      yield speakable(await run());
+    })();
+  }
+
   /* ---------------- human edits ---------------- */
 
   private handleHumanOps(conn: Connection<ConnState>, author: AuthorRef, ops: unknown) {
@@ -180,7 +217,7 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
 
   /* ---------------- AI ---------------- */
 
-  private async runAiTurn(author: AuthorRef, text: string, selectionIds: string[] = []) {
+  private async runAiTurn(author: AuthorRef, text: string, selectionIds: string[] = []): Promise<string> {
     const now = Date.now();
     const before = this.state.diagram;
     const selection = selectionIds
@@ -307,6 +344,7 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     } finally {
       this.setState({ ...this.state, aiBusy: null });
     }
+    return aiMsg.text;
   }
 
   /**
@@ -527,7 +565,7 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
 
   private presenceOf(conn: Connection<ConnState>): Presence | null {
     const s = conn.state;
-    return s ? { connectionId: conn.id, userId: s.userId, name: s.name, color: s.color, role: s.role } : null;
+    return s && !s.voice ? { connectionId: conn.id, userId: s.userId, name: s.name, color: s.color, role: s.role } : null;
   }
 
   private broadcastPresence(excludeId?: string) {
@@ -540,8 +578,9 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
     this.emit({ type: "presence", users });
   }
 
-  private emit(msg: ServerMessage, exclude?: string[]) {
-    this.broadcast(JSON.stringify(msg), exclude);
+  private emit(msg: ServerMessage, exclude: string[] = []) {
+    const voice = [...this.getConnections<ConnState>()].filter((c) => c.state?.voice).map((c) => c.id);
+    this.broadcast(JSON.stringify(msg), [...exclude, ...voice]);
   }
 
   private sendTo(conn: Connection, msg: ServerMessage) {
@@ -553,4 +592,13 @@ export class CanvasAgent extends Agent<Env, CanvasState> {
 function withLayout(d: Diagram): Diagram {
   const pos = layeredLayout(d.nodes, d.edges);
   return { ...d, nodes: d.nodes.map((n) => ({ ...n, ...(pos.get(n.id) ?? {}) })) };
+}
+
+// Spoken replies stay short; the full text is in the chat.
+function speakable(reply: string): string {
+  const plain = reply.replace(/^\s*[•\-*]\s*/gm, "").replace(/\s+/g, " ").trim();
+  if (plain.length <= 420) return plain;
+  const cut = plain.slice(0, 420);
+  const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
+  return `${end > 120 ? cut.slice(0, end + 1) : cut} The rest is in the chat.`;
 }

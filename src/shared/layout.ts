@@ -9,10 +9,7 @@ type Pos = { x: number; y: number };
 type NodeLike = Pick<DiagramNode, "id" | "x" | "y">;
 type EdgeLike = Pick<DiagramEdge, "source" | "target">;
 
-/**
- * Simple layered (left-to-right) layout. Deterministic and dependency-free,
- * so the server and the browser produce the same positions.
- */
+// Deterministic and dependency-free so the server and browser compute identical positions.
 export function layeredLayout(nodes: NodeLike[], edges: EdgeLike[]): Map<string, Pos> {
   const ids = nodes.map((n) => n.id);
   const known = new Set(ids);
@@ -28,8 +25,7 @@ export function layeredLayout(nodes: NodeLike[], edges: EdgeLike[]): Map<string,
     inc.get(e.target)!.push(e.source);
   }
 
-  // Longest-path layering with Kahn's algorithm. Nodes stuck in cycles are
-  // placed one layer after their deepest already-placed predecessor.
+  // Nodes stuck in cycles go one layer after their deepest placed predecessor.
   const layer = new Map<string, number>();
   const indeg = new Map(ids.map((id) => [id, inc.get(id)!.length]));
   const queue = ids.filter((id) => indeg.get(id) === 0);
@@ -48,11 +44,10 @@ export function layeredLayout(nodes: NodeLike[], edges: EdgeLike[]): Map<string,
     layer.set(id, preds.length ? Math.max(...preds.map((p) => layer.get(p)!)) + 1 : 0);
   }
 
-  // Boxes with no connections at all go in a small grid instead of one tall column.
+  // Unconnected boxes go in a grid; otherwise they'd stack into one tall column.
   const isolated = ids.filter((id) => !out.get(id)!.length && !inc.get(id)!.length);
   const isolatedSet = new Set(isolated);
 
-  // Group into columns, then order each column by the average row of its predecessors.
   const columns: string[][] = [];
   for (const id of ids) {
     if (isolatedSet.has(id)) continue;
@@ -92,7 +87,6 @@ function overlaps(p: Pos, others: NodeLike[]): boolean {
   );
 }
 
-/** Finds a free spot for a new node next to something it is connected to. */
 export function placeNear(nodeId: string, placed: NodeLike[], edges: EdgeLike[]): Pos {
   const byId = new Map(placed.map((n) => [n.id, n]));
   let base: Pos | null = null;

@@ -1,5 +1,3 @@
--- Workspaces, projects, membership and invites.
-
 CREATE TABLE workspace (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
@@ -28,7 +26,6 @@ CREATE TABLE project (
 );
 CREATE INDEX project_workspace_idx ON project(workspace_id);
 
--- People invited to a single project without joining its workspace.
 CREATE TABLE project_guest (
   project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,

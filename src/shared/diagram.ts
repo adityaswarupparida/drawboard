@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-/** Every box on the canvas has one of these kinds. The AI must pick from this list. */
 export const NODE_KINDS = [
   "client",
   "cdn",
@@ -81,11 +80,7 @@ export interface Annotation {
 export const NODE_W = 184;
 export const NODE_H = 64;
 
-/* ------------------------------------------------------------------ */
-/* Edits ("ops"). Humans and the AI change the diagram ONLY through    */
-/* these. The server validates every op before applying it.            */
-/* ------------------------------------------------------------------ */
-
+// Ops are the only way humans and the AI change a diagram; the server validates each one.
 const id = z.string().trim().min(1).max(48);
 const label = z.string().trim().min(1).max(40);
 const coord = z.number().finite().min(-100_000).max(100_000);

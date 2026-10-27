@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AI_AUTHOR, colorFor, type CanvasState, type ChatMessage, type HistoryEntry } from "../../shared/protocol";
-import { api } from "../api";
+import { useVoiceAgent } from "agents/voice/react";
 import { Avatar, clock } from "../components/ui";
 import { MicIcon } from "../icons";
 
@@ -36,7 +36,7 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
   const [tab, setTab] = useState<"chat" | "history">("chat");
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
-  const voice = useVoice(projectId, (t) => (t ? onSend(t) : showToast("I didn't catch that. Try again a bit closer to the mic.")), showToast);
+  const voice = useLiveVoice(projectId, showToast);
 
   useEffect(() => {
     const el = listRef.current;
@@ -103,9 +103,11 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
                 <button type="button" className="chip" disabled={!connected || state.review.status === "running"} onClick={onReview}>Review this design</button>
               )}
             </div>
-            {voice.status !== "idle" && (
-              <div className="listen">
-                {voice.status === "recording" ? "Listening… click the mic again when you're done." : "Turning your voice into text…"}
+            {voice.on && (
+              <div className="listen live">
+                <span className="level" style={{ transform: `scaleY(${0.25 + Math.min(1, voice.level * 8)})` }} />
+                <span>{voice.label}</span>
+                <button type="button" className="btn small" onClick={voice.stop}>End</button>
               </div>
             )}
             {selection.length > 0 && (
@@ -120,11 +122,11 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
             <form onSubmit={submit}>
               <button
                 type="button"
-                className={`mic${voice.status === "recording" ? " on" : ""}`}
-                onClick={voice.toggle}
-                disabled={disabled || voice.status === "transcribing"}
-                aria-label={voice.status === "recording" ? "Stop recording" : "Talk instead of typing"}
-                title={voice.status === "recording" ? "Stop recording" : "Talk instead of typing"}
+                className={`mic${voice.on ? " on" : ""}`}
+                onClick={voice.on ? voice.stop : voice.start}
+                disabled={!canEdit || !connected}
+                aria-label={voice.on ? "End voice conversation" : "Talk with the AI"}
+                title={voice.on ? "End voice conversation" : "Talk with the AI (hands-free)"}
               >
                 <MicIcon />
               </button>
@@ -200,46 +202,43 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
   );
 }
 
-/** Push-to-talk: record in the browser, transcribe with Whisper on the server. */
-function useVoice(projectId: string, onText: (t: string) => void, onError: (msg: string) => void) {
-  const [status, setStatus] = useState<"idle" | "recording" | "transcribing">("idle");
-  const rec = useRef<MediaRecorder | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+/**
+ * Hands-free voice: the SDK streams mic audio to the canvas agent on a second socket,
+ * which transcribes turns, runs them as chat requests and speaks a short reply.
+ */
+function useLiveVoice(projectId: string, onError: (msg: string) => void) {
+  const [on, setOn] = useState(false);
+  const started = useRef(false);
+  const voice = useVoiceAgent({ agent: "canvas-agent", name: projectId, query: { voice: "1" }, enabled: on });
+
+  useEffect(() => {
+    if (!on || !voice.connected || started.current) return;
+    started.current = true;
+    voice.startCall().catch(() => {
+      onError("Couldn't start the microphone. Allow mic access in your browser and try again.");
+      setOn(false);
+    });
+  }, [on, voice.connected, voice, onError]);
+
+  useEffect(() => {
+    if (voice.error && on) onError(voice.error);
+  }, [voice.error, on, onError]);
 
   const stop = () => {
-    clearTimeout(timer.current);
-    if (rec.current && rec.current.state !== "inactive") rec.current.stop();
+    voice.endCall();
+    started.current = false;
+    setOn(false);
   };
 
-  const start = async () => {
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      onError("Microphone access was blocked. Allow it in your browser to talk to the AI.");
-      return;
-    }
-    const chunks: BlobPart[] = [];
-    const r = new MediaRecorder(stream);
-    r.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    r.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      setStatus("transcribing");
-      try {
-        const text = await api.transcribe(projectId, new Blob(chunks, { type: r.mimeType || "audio/webm" }));
-        onText(text);
-      } catch (e) {
-        onError((e as Error).message);
-      } finally {
-        setStatus("idle");
-      }
-    };
-    rec.current = r;
-    r.start();
-    setStatus("recording");
-    timer.current = setTimeout(stop, 30_000); // keep recordings short
-  };
+  const label = !voice.connected
+    ? "Connecting…"
+    : voice.interimTranscript
+      ? `\u201C${voice.interimTranscript}\u201D`
+      : voice.status === "thinking"
+        ? "Working on it…"
+        : voice.status === "speaking"
+          ? "Speaking… talk to interrupt"
+          : "Listening. Just talk.";
 
-  const toggle = () => (status === "recording" ? stop() : status === "idle" ? void start() : undefined);
-  return { status, toggle };
+  return { on, start: () => setOn(true), stop, label, level: voice.audioLevel };
 }

@@ -4,7 +4,6 @@ import { api } from "../api";
 
 export const LAST_WS_KEY = "drawboard:lastWorkspace";
 
-/** Sends people to the workspace they used last, or their personal one. */
 export function Home() {
   const [target, setTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

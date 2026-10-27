@@ -11,13 +11,11 @@ export { DesignReviewWorkflow } from "./review-workflow";
 
 const app = new Hono<AppEnv>();
 
-// Sign-in, sign-up, OAuth callbacks, sign-out.
 app.on(["GET", "POST"], "/api/auth/*", (c) => createAuth(c.env, c.req.url).handler(c.req.raw));
 
-// Public: which sign-in buttons the login page should show.
 app.get("/api/config", (c) => c.json({ providers: enabledProviders(c.env) }));
 
-// Attach the signed-in user (or null) to every other API request.
+// Order matters: the two routes above respond before this session lookup runs.
 app.use("/api/*", async (c, next) => {
   const session = await createAuth(c.env, c.req.url).api.getSession({ headers: c.req.raw.headers });
   c.set("user", session?.user ?? null);
@@ -26,9 +24,7 @@ app.use("/api/*", async (c, next) => {
 
 app.route("/api", api);
 
-// Live canvas connections: /agents/canvas-agent/:projectId
-// Check the session and project role here, then pass identity to the agent in headers
-// it can trust (anything the browser sent under these names is overwritten).
+// The agent trusts these x-* identity headers because we overwrite whatever the browser sent.
 app.all("/agents/*", async (c) => {
   const res = await routeAgentRequest(c.req.raw, c.env, {
     onBeforeConnect: async (req, { name }) => {
@@ -42,7 +38,7 @@ app.all("/agents/*", async (c) => {
       headers.set("x-role", access.role);
       return new Request(req, { headers });
     },
-    // Plain HTTP access to the agent is not part of this app.
+    // WebSocket only; no plain HTTP access to the agent.
     onBeforeRequest: () => new Response("Not found", { status: 404 }),
   });
   return res ?? c.json({ error: "Not found" }, 404);

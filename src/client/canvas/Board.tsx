@@ -47,7 +47,6 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
   const prevIds = useRef<Set<string> | null>(null);
   const pendingSelect = useRef<string | null>(null);
 
-  /* Glow boxes that just appeared, in the colour of whoever added them. */
   useEffect(() => {
     const ids = new Set(diagram.nodes.map((n) => n.id));
     const before = prevIds.current;
@@ -71,14 +70,13 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
     return () => clearTimeout(t);
   }, [diagram.nodes, rf, setSelNodes]);
 
-  /* When the AI finishes a turn, make sure its work is in view. */
   const wasBusy = useRef(false);
   useEffect(() => {
     if (wasBusy.current && !state.aiBusy && diagram.nodes.length) rf.fitView({ padding: 0.25, duration: 400, maxZoom: 1 });
     wasBusy.current = !!state.aiBusy;
   }, [state.aiBusy, diagram.nodes.length, rf]);
 
-  /* Drop local drag positions once the server has the same position. */
+  // Keep the local drag position until the server echoes it back, so boxes don't snap back.
   useEffect(() => {
     setLocalPos((prev) => {
       let changed = false;
@@ -92,7 +90,6 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
       }
       return changed ? next : prev;
     });
-    // Forget selections of things that no longer exist.
     setSelNodes((s) => s.filter((id) => diagram.nodes.some((n) => n.id === id)));
     setSelEdges((s) => s.filter((id) => diagram.edges.some((e) => e.id === id)));
   }, [diagram, setSelNodes]);
@@ -200,7 +197,6 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
     [send],
   );
 
-  /* ---- toolbar ---- */
   const selNode = selNodes.length === 1 ? diagram.nodes.find((n) => n.id === selNodes[0]) : undefined;
   const selEdge = !selNode && selEdges.length === 1 ? diagram.edges.find((e) => e.id === selEdges[0]) : undefined;
   useEffect(() => {

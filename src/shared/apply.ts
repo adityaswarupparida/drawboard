@@ -15,7 +15,6 @@ export interface ApplyOptions {
 
 export interface ApplyResult {
   diagram: Diagram;
-  /** Human-readable line per applied op, e.g. `connect API → Redis`. */
   lines: string[];
   errors: string[];
   changed: boolean;
@@ -32,11 +31,8 @@ export function slug(s: string): string {
 
 const q = (s: string) => `“${s}”`;
 
-/**
- * Applies a batch of ops to a copy of the diagram. Invalid ops are skipped and
- * reported in `errors`; valid ones still apply. Pure function: shared by the
- * server (source of truth) and the client (optimistic preview).
- */
+// Invalid ops are skipped (reported in `errors`) while the rest still apply.
+// Must stay pure: the server and the client's optimistic preview both run it.
 export function applyOps(input: Diagram, ops: Op[], by: AuthorRef, opts: ApplyOptions): ApplyResult {
   const d: Diagram = structuredClone(input);
   const lines: string[] = [];
@@ -191,8 +187,7 @@ export function applyOps(input: Diagram, ops: Op[], by: AuthorRef, opts: ApplyOp
     }
   }
 
-  // Give new nodes a position. An (almost) empty canvas gets a full tidy layout;
-  // otherwise new boxes go next to whatever they are connected to.
+  // A near-empty canvas gets a full layout; otherwise new boxes go next to their neighbours.
   if (unplaced.length) {
     if (placedBefore <= 1) {
       const pos = layeredLayout(d.nodes, d.edges);
@@ -219,7 +214,6 @@ export function applyOps(input: Diagram, ops: Op[], by: AuthorRef, opts: ApplyOp
   return { diagram: d, lines, errors, changed: lines.length > 0, addedNodeIds };
 }
 
-/** One-line summary of a batch, for the history list. */
 export function summarize(lines: string[]): string {
   if (!lines.length) return "no changes";
   const moves = lines.filter((l) => l.startsWith("move "));

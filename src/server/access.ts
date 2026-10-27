@@ -19,7 +19,6 @@ export interface ProjectAccess {
   guest: boolean;
 }
 
-/** A user reaches a project through workspace membership, or as a guest of that one project. */
 export async function projectAccess(db: DB, projectId: string, userId: string): Promise<ProjectAccess | null> {
   const row = await db
     .select({ p: project, wsName: workspace.name })
@@ -29,13 +28,14 @@ export async function projectAccess(db: DB, projectId: string, userId: string): 
     .get();
   if (!row) return null;
   const wsRole = await workspaceRole(db, row.p.workspaceId, userId);
-  if (wsRole) return { project: row.p, workspaceName: row.wsName, role: wsRole, guest: false };
   const g = await db
     .select({ role: projectGuest.role })
     .from(projectGuest)
     .where(and(eq(projectGuest.projectId, projectId), eq(projectGuest.userId, userId)))
     .get();
-  if (g) return { project: row.p, workspaceName: row.wsName, role: g.role, guest: true };
+  // Someone can be both a workspace viewer and an editor guest on one project; the higher role wins.
+  if (wsRole && (!g || RANK[wsRole] >= RANK[g.role])) return { project: row.p, workspaceName: row.wsName, role: wsRole, guest: false };
+  if (g) return { project: row.p, workspaceName: row.wsName, role: g.role, guest: !wsRole };
   return null;
 }
 

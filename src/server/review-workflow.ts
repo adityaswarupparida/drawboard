@@ -6,10 +6,7 @@ import type { Env } from "./env";
 
 type Params = { requestedBy: string };
 
-/**
- * Design review as a durable Workflow: one step per area, each retried on
- * failure, then the findings are pinned to the canvas.
- */
+// One step per area so a failed model call retries only that area.
 export class DesignReviewWorkflow extends AgentWorkflow<CanvasAgent, Params, unknown, Env> {
   async run(event: AgentWorkflowEvent<Params>, step: AgentWorkflowStep) {
     const diagram = await step.do("load diagram", async () => this.agent.getDiagram());

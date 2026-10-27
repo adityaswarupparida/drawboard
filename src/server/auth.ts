@@ -14,7 +14,7 @@ export function enabledProviders(env: Env) {
   };
 }
 
-/** Better Auth reads config per request because Worker env is only available at request time. */
+// Created per request: Worker env bindings only exist at request time.
 export function createAuth(env: Env, requestUrl: string) {
   const db = getDb(env);
   const origin = env.BETTER_AUTH_URL || new URL(requestUrl).origin;
@@ -33,7 +33,6 @@ export function createAuth(env: Env, requestUrl: string) {
     databaseHooks: {
       user: {
         create: {
-          // Every new account gets a personal workspace.
           after: async (u) => {
             const existing = await db.select({ id: workspace.id }).from(workspace).where(eq(workspace.createdBy, u.id)).get();
             if (!existing) await createPersonalWorkspace(db, u.id, u.name || "My");

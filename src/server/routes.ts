@@ -24,7 +24,6 @@ const nameSchema = z.string().trim().min(1).max(60);
 
 export const api = new Hono<AppEnv>();
 
-// Every API route needs a signed-in user.
 api.use("*", async (c, next) => {
   if (!c.get("user")) return c.json({ error: "Please sign in" }, 401);
   await next();
@@ -63,8 +62,6 @@ export async function createPersonalWorkspace(db: DB, userId: string, name: stri
   return id;
 }
 
-/* ---------------- workspaces ---------------- */
-
 api.get("/workspaces", async (c) => {
   const db = getDb(c.env);
   const me = c.get("user")!;
@@ -76,7 +73,7 @@ api.get("/workspaces", async (c) => {
     .orderBy(desc(workspace.personal), workspace.createdAt)
     .all();
   if (!rows.length) {
-    // Safety net: everyone should have a personal workspace.
+    // Safety net in case the sign-up hook didn't create a personal workspace.
     await createPersonalWorkspace(db, me.id, me.name);
     return c.redirect("/api/workspaces");
   }
@@ -200,8 +197,6 @@ api.post("/workspaces/:id/leave", async (c) => {
   return c.body(null, 204);
 });
 
-/* ---------------- projects ---------------- */
-
 api.get("/projects/shared", async (c) => {
   const db = getDb(c.env);
   const rows = await db
@@ -260,7 +255,7 @@ api.delete("/projects/:id", async (c) => {
   const acc = await projectAccess(db, c.req.param("id"), c.get("user")!.id);
   if (!acc || acc.guest || !atLeast(acc.role, "editor")) return c.json(bad("You can't delete this project."), 403);
   await db.delete(project).where(eq(project.id, acc.project.id));
-  // Wipe the canvas storage too.
+  // The canvas lives in the Durable Object, not D1, so wipe it separately.
   const stub = c.env.CanvasAgent.get(c.env.CanvasAgent.idFromName(acc.project.id));
   await stub.destroyCanvas().catch(() => {});
   return c.body(null, 204);
@@ -289,8 +284,6 @@ api.post("/projects/:id/transcribe", async (c) => {
     return c.json(bad("Could not transcribe that recording."), 502);
   }
 });
-
-/* ---------------- invites ---------------- */
 
 api.post("/invites", async (c) => {
   const db = getDb(c.env);

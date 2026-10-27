@@ -26,10 +26,6 @@ const KIND_HELP: Record<string, string> = {
   external: "third-party API",
 };
 
-/* ------------------------------------------------------------------ */
-/* Model calls                                                        */
-/* ------------------------------------------------------------------ */
-
 export function describeDiagram(d: Diagram, mark?: Set<string>): string {
   if (!d.nodes.length) return "The canvas is empty.";
   const nodes = d.nodes
@@ -61,7 +57,6 @@ function parseJson(raw: unknown): unknown {
   }
 }
 
-/** One JSON-mode call, retried once if the output can't be parsed. */
 async function runJson(ai: Ai, messages: Msg[], schema: object, maxTokens: number): Promise<Record<string, unknown>> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const msgs = attempt === 0
@@ -79,16 +74,29 @@ async function runJson(ai: Ai, messages: Msg[], schema: object, maxTokens: numbe
   throw new Error("The model did not return valid JSON");
 }
 
-/** JSON-mode call that streams tokens; `onText` gets the full text so far after each chunk. */
+/** `onText` receives the full text so far, not the latest delta. */
 async function streamJson(ai: Ai, messages: Msg[], schema: object, maxTokens: number, onText: (text: string) => void): Promise<string> {
-  const stream = (await ai.run(CHAT_MODEL, {
+  const out = (await ai.run(CHAT_MODEL, {
     messages,
     response_format: { type: "json_schema", json_schema: schema },
     max_tokens: maxTokens,
     temperature: 0.3,
     stream: true,
-  } as never)) as unknown as ReadableStream<Uint8Array>;
-  const reader = stream.getReader();
+  } as never)) as unknown;
+  // Usually a ReadableStream, but some paths hand back a Response or an already-finished result.
+  const stream =
+    out instanceof ReadableStream ? out
+    : out instanceof Response ? out.body
+    : typeof (out as { getReader?: unknown })?.getReader === "function" ? (out as ReadableStream<Uint8Array>)
+    : null;
+  if (!stream) {
+    const r = (out as { response?: unknown })?.response;
+    const text = typeof r === "string" ? r : r && typeof r === "object" ? JSON.stringify(r) : "";
+    if (!text) throw new Error("Empty model response");
+    onText(text);
+    return text;
+  }
+  const reader = (stream as ReadableStream<Uint8Array>).getReader();
   const decoder = new TextDecoder();
   let pending = "";
   let text = "";
@@ -106,8 +114,7 @@ async function streamJson(ai: Ai, messages: Msg[], schema: object, maxTokens: nu
       if (!data || data === "[DONE]") continue;
       try {
         const chunk = JSON.parse(data) as { response?: unknown; choices?: { delta?: { content?: unknown } }[] };
-        // Prefer the OpenAI-style delta text. The legacy `response` field can arrive as a
-        // JSON number for numeric tokens (e.g. 100), which would otherwise be dropped.
+        // Prefer `delta.content`: the legacy `response` field arrives as a JSON number for numeric tokens (e.g. 100).
         const delta = chunk.choices?.[0]?.delta?.content;
         const piece =
           typeof delta === "string" ? delta
@@ -127,17 +134,10 @@ async function streamJson(ai: Ai, messages: Msg[], schema: object, maxTokens: nu
   return text;
 }
 
-/* ------------------------------------------------------------------ */
-/* Intent                                                             */
-/* ------------------------------------------------------------------ */
-
 const EDIT_WORDS =
   /\b(add|adding|remove|delete|drop|design (a|an|me|it|for|this|something)|redesign|build|create|draw|sketch|connect|disconnect|wire|replace|rename|change|move|insert|split|merge|introduce|put|swap|include|attach|label|update|fix|make)\b/;
 
-/**
- * Questions and "explain this" requests go to an answer-only prompt that has no
- * way to edit the diagram. Llama otherwise tends to "help" by adding boxes.
- */
+// Questions get an answer-only prompt with no way to edit; otherwise Llama tends to "help" by adding boxes.
 export function wantsAnswerOnly(text: string): boolean {
   const t = text.toLowerCase().trim();
   const explain = /\b(explain|describe|walk (me )?through|summari[sz]e|tell me about|what (exactly )?(does|do|is|are)|what's)\b/.test(t);
@@ -146,10 +146,6 @@ export function wantsAnswerOnly(text: string): boolean {
   const question = /\?\s*$/.test(t) || /^(what|why|how|is|are|does|do|which|where|when|who|should|would|could)\b/.test(t);
   return question && !EDIT_WORDS.test(t);
 }
-
-/* ------------------------------------------------------------------ */
-/* Chat turn                                                          */
-/* ------------------------------------------------------------------ */
 
 const OP_ITEM = {
   type: "object",
@@ -254,9 +250,7 @@ export interface TurnArgs {
 }
 
 export interface TurnHandlers {
-  /** Called once per valid edit, in order, as soon as the model has written it. */
   onOp: (op: Op) => void;
-  /** Called with the reply text so far. */
   onReply: (text: string) => void;
 }
 
@@ -268,8 +262,7 @@ export interface TurnResult {
 }
 
 function historyMessages(chat: ChatMessage[]): Msg[] {
-  // Tell the model what each earlier AI reply actually did, so it can't talk
-  // itself into thinking the diagram was never built.
+  // Annotate past AI replies with what they actually did, or the model talks itself into thinking nothing was built.
   return chat
     .filter((m) => m.role !== "system" && m.status !== "thinking" && m.text)
     .slice(-8)
@@ -284,10 +277,6 @@ function historyMessages(chat: ChatMessage[]): Msg[] {
     });
 }
 
-/**
- * Runs one chat turn. Edits and reply text are streamed to the handlers as the
- * model writes them; falls back to a normal call if streaming fails.
- */
 export async function runChatTurn(ai: Ai, args: TurnArgs, h: TurnHandlers): Promise<TurnResult> {
   const mode = wantsAnswerOnly(args.text) ? "answer" : "edit";
   const n = args.diagram.nodes.length;
@@ -326,7 +315,7 @@ export async function runChatTurn(ai: Ai, args: TurnArgs, h: TurnHandlers): Prom
       if (s.reply !== null) h.onReply(s.reply);
     });
     final = parseJson(text) as Record<string, unknown> | null;
-    // Anything the scanner missed (e.g. ops written after the reply).
+    // Catch ops the scanner missed, e.g. ones written after the reply.
     if (final && mode === "edit" && Array.isArray(final.ops)) for (const raw of final.ops.slice(emitted)) emitRaw(raw);
   } catch (err) {
     console.warn("streaming failed, falling back", err);
@@ -348,20 +337,12 @@ export async function runChatTurn(ai: Ai, args: TurnArgs, h: TurnHandlers): Prom
   return { mode, reply, highlights: parseHighlights(final?.highlights), rejected };
 }
 
-/* ------------------------------------------------------------------ */
-/* Self-check after a design turn                                     */
-/* ------------------------------------------------------------------ */
-
 const CHECK_SCHEMA = {
   type: "object",
   properties: { fixes: { type: "array", items: OP_ITEM }, note: { type: "string" } },
   required: ["fixes", "note"],
 };
 
-/**
- * A strict second look at what the AI just drew. Returns small fixes
- * (missing connections, duplicates, one essential missing piece).
- */
 export async function verifyDesign(ai: Ai, request: string, diagram: Diagram, added: Set<string>): Promise<{ fixes: Op[]; note: string }> {
   const kinds = NODE_KINDS.join(", ");
   const raw = await runJson(
@@ -387,7 +368,7 @@ kind must be one of: ${kinds}. Use exact ids. If the diagram is fine, return {"f
   for (const item of Array.isArray(raw.fixes) ? raw.fixes.slice(0, 10) : []) {
     const r = OpSchema.safeParse(normalizeOp(item));
     if (!r.success) continue;
-    // Never let the check delete something people made.
+    // Only boxes added this turn may be removed; never delete what people made.
     if (r.data.type === "remove_node" && !added.has(r.data.id)) continue;
     fixes.push(r.data);
   }
@@ -410,7 +391,6 @@ const CONNECT_SCHEMA = {
   required: ["connections"],
 };
 
-/** Asks only for the connections of boxes that ended up unconnected. */
 export async function connectIsolated(ai: Ai, diagram: Diagram, isolated: string[]): Promise<Op[]> {
   const raw = await runJson(
     ai,
@@ -433,10 +413,6 @@ Connect each unconnected box the way requests and data actually flow (client -> 
   return out;
 }
 
-/* ------------------------------------------------------------------ */
-/* Output clean-up                                                    */
-/* ------------------------------------------------------------------ */
-
 function parseHighlights(list: unknown): Record<string, Severity> {
   const out: Record<string, Severity> = {};
   for (const h of Array.isArray(list) ? list : []) {
@@ -447,12 +423,11 @@ function parseHighlights(list: unknown): Record<string, Severity> {
   return out;
 }
 
-/** Small fixes for common model slips before strict validation. */
 function normalizeOp(item: unknown): unknown {
   if (!item || typeof item !== "object") return item;
   const o = { ...(item as Record<string, unknown>) };
   for (const k of Object.keys(o)) if (o[k] === null || o[k] === "") delete o[k];
-  // Accept common synonyms the model sometimes uses.
+  // Synonyms the model sometimes uses.
   if (o.source === undefined && typeof o.from === "string") o.source = o.from;
   if (o.target === undefined && typeof o.to === "string") o.target = o.to;
   if (o.label === undefined && typeof o.name === "string") o.label = o.name;
@@ -475,10 +450,6 @@ function guessKind(k: string): string {
   if (/balanc/.test(k)) return "lb";
   return "service";
 }
-
-/* ------------------------------------------------------------------ */
-/* Design review (one call per area, run as Workflow steps)           */
-/* ------------------------------------------------------------------ */
 
 const AREA_FOCUS: Record<string, string> = {
   Reliability: "single points of failure, missing replicas/failover, retries, data loss risk",
@@ -542,10 +513,6 @@ Give at most 3 findings, the most important first. Only report real issues visib
   }
   return out;
 }
-
-/* ------------------------------------------------------------------ */
-/* Voice                                                              */
-/* ------------------------------------------------------------------ */
 
 export async function transcribe(ai: Ai, audio: ArrayBuffer): Promise<string> {
   const bytes = new Uint8Array(audio);

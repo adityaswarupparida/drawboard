@@ -4,8 +4,6 @@ export type Role = "owner" | "editor" | "viewer";
 export const ROLES: Role[] = ["owner", "editor", "viewer"];
 export const canEdit = (r: Role | null | undefined) => r === "owner" || r === "editor";
 
-/* ---------------- Agent state (synced to every client) ---------------- */
-
 export interface ReviewStatus {
   status: "idle" | "running";
   step?: string;
@@ -13,23 +11,18 @@ export interface ReviewStatus {
   startedBy?: string;
 }
 
+// Agent state: broadcast to every connected client.
 export interface CanvasState {
   diagram: Diagram;
-  /** Notes pinned to boxes by the design review. */
   annotations: Annotation[];
-  /** Boxes the AI highlighted while answering a question. */
   highlights: Record<string, Severity>;
   review: ReviewStatus;
-  /** Who the AI is currently working for, if anyone. */
   aiBusy: { for: string } | null;
   version: number;
-  /** What Undo would roll back, if anything. */
   undo: { summary: string; by: string } | null;
 }
 
 export const REVIEW_STEPS = ["Reliability", "Scaling", "Security", "Cost"] as const;
-
-/* ---------------- Chat + history ---------------- */
 
 export interface Finding {
   nodeId: string;
@@ -45,13 +38,11 @@ export interface ChatMessage {
   role: "user" | "ai" | "system";
   author: AuthorRef;
   text: string;
-  /** Edits the AI made, as readable lines. */
+  /** Readable summary lines, not Op objects. */
   ops?: string[];
   findings?: Finding[];
   status?: "thinking" | "done" | "error";
-  /** What the AI is doing right now, shown while status is "thinking". */
   phase?: string;
-  /** Extra context for a user message, e.g. which boxes were selected. */
   context?: string;
   meta?: string;
   createdAt: number;
@@ -71,8 +62,6 @@ export interface Presence {
   color: string;
   role: Role;
 }
-
-/* ---------------- WebSocket messages ---------------- */
 
 export type ClientMessage =
   | { type: "ops"; ops: Op[] }
@@ -99,8 +88,6 @@ export type ServerMessage =
   | { type: "drag"; connectionId: string; id: string; x: number; y: number }
   | { type: "error"; message: string };
 
-/* ---------------- REST API types ---------------- */
-
 export interface WorkspaceSummary {
   id: string;
   name: string;
@@ -117,7 +104,6 @@ export interface ProjectSummary {
   description: string | null;
   createdBy: string;
   updatedAt: number;
-  /** Set when the user reaches this project as a guest rather than a workspace member. */
   guestRole?: Role;
 }
 

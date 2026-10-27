@@ -1,5 +1,3 @@
--- Tables used by Better Auth (users, sessions, linked accounts, verification tokens).
-
 CREATE TABLE user (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,

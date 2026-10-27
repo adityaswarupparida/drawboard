@@ -1,10 +1,4 @@
-/**
- * Reads a JSON object while the model is still writing it, so edits can be
- * applied and the reply shown before the response is finished.
- *
- * Returns every fully written item of the top-level "ops" array (as raw JSON
- * text) and the "reply" string so far (decoded, possibly incomplete).
- */
+// Hand-rolled because the JSON is still being written: yields each complete `ops` item (raw text) and the `reply` so far.
 export interface PartialScan {
   ops: string[];
   reply: string | null;
@@ -23,7 +17,7 @@ export function scanPartial(buf: string): PartialScan {
   let key = "";
   let lastKey = "";
   let stringStart = -1;
-  let opsArrayDepth = -1; // depth at which the ops array's items live
+  let opsArrayDepth = -1;
   let itemStart = -1;
   let readingReply = false;
   let replyRaw = "";
@@ -43,7 +37,7 @@ export function scanPartial(buf: string): PartialScan {
       if (ch === '"') {
         inString = false;
         if (readingReply) {
-          replyRaw = replyRaw.slice(0, -1); // drop closing quote
+          replyRaw = replyRaw.slice(0, -1); // the closing quote was already appended above
           readingReply = false;
           replyDone = true;
           reply = decode(replyRaw);
@@ -93,7 +87,6 @@ export function scanPartial(buf: string): PartialScan {
   return { ops, reply, replyDone };
 }
 
-/** Decodes the body of a JSON string, tolerating a cut-off escape at the end. */
 function decode(raw: string): string {
   let s = raw;
   // Trim a trailing partial escape such as `\` or `\u12`.
