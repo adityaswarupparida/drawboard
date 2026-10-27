@@ -141,7 +141,9 @@ How to edit the diagram (ops):
 Rules:
 - Make the smallest set of edits that does what was asked. Never remove or rename boxes unless asked.
 - If the user asks a question ("what if", "why", "how", "is this ok"), answer it in reply. Usually make no ops. Put the boxes you talk about in highlights (critical = breaks or is at risk, warning = concern, ok = fine).
-- If the canvas is empty and the user asks for a system, design it: 5 to 12 boxes, connected in the direction requests and data flow.
+- If the canvas is empty and the user asks for a system, design it: 6 to 12 boxes. After the add_node ops, ALWAYS add connect ops so every box is connected, in the direction requests and data flow.
+- Design like a senior engineer, not a generic web stack. Include the pieces that make THIS system work (for example WebSocket servers and a presence store for chat, an ID generator for a URL shortener, a matching service and location store for ride-sharing, a fan-out queue for feeds).
+- Use concrete technology names in labels where it helps ("Postgres", "Redis cache", "Kafka", "S3 media"), and give every new box a one-line description of its job.
 - New box ids are short lowercase slugs. Refer to existing boxes by their exact id from the list below.
 - "kind" must be one of: ${kinds}.
 - Labels: 1 to 3 words, max 24 characters. Connection labels: 1 or 2 words, max 16 characters, or omit.
@@ -197,8 +199,60 @@ export async function runDesignTurn(
     const sev = (h as { severity?: unknown }).severity;
     if (typeof id === "string" && (sev === "critical" || sev === "warning" || sev === "ok")) highlights[id] = sev;
   }
+  // Llama sometimes adds a batch of boxes and forgets to wire them up. Ask once more for just the connections.
+  const added = ops.filter((o) => o.type === "add_node");
+  const connects = ops.filter((o) => o.type === "connect").length;
+  if (added.length >= 3 && connects < added.length - 1) {
+    try {
+      ops.push(...(await askForConnections(ai, args.diagram, added)));
+    } catch (e) {
+      console.warn("follow-up for connections failed", e);
+    }
+  }
+
   const reply = typeof raw.reply === "string" && raw.reply.trim() ? raw.reply.trim() : ops.length ? "Done." : "I'm not sure how to help with that. Try describing a change to the diagram.";
   return { reply, ops, rejected, highlights };
+}
+
+const CONNECT_SCHEMA = {
+  type: "object",
+  properties: {
+    connections: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { source: { type: "string" }, target: { type: "string" }, label: { type: "string" } },
+        required: ["source", "target"],
+      },
+    },
+  },
+  required: ["connections"],
+};
+
+async function askForConnections(ai: Ai, diagram: Diagram, added: Extract<Op, { type: "add_node" }>[]): Promise<Op[]> {
+  const boxes = [
+    ...diagram.nodes.map((n) => `- ${n.id} | ${n.kind} | ${n.label}`),
+    ...added.map((n) => `- ${n.id ?? n.label} | ${n.kind} | ${n.label}${n.description ? ` | ${n.description}` : ""}`),
+  ].join("\n");
+  const raw = (await runJson(
+    ai,
+    [
+      {
+        role: "system",
+        content: `You connect boxes in a software architecture diagram. Return ONLY JSON: {"connections":[{"source":"<box id>","target":"<box id>","label":"<1-2 words, optional>"}]}.
+Connect them the way requests and data actually flow (client -> edge/gateway -> services -> stores/queues -> workers). Every box should have at least one connection. Use the exact ids from the list.`,
+      },
+      { role: "user", content: `Boxes (id | kind | label | notes):\n${boxes}` },
+    ],
+    CONNECT_SCHEMA,
+    1200,
+  )) as { connections?: unknown };
+  const out: Op[] = [];
+  for (const c of Array.isArray(raw.connections) ? raw.connections.slice(0, 40) : []) {
+    const r = OpSchema.safeParse(normalizeOp({ type: "connect", ...(c as object) }));
+    if (r.success) out.push(r.data);
+  }
+  return out;
 }
 
 /** Small fixes for common model slips before strict validation. */
@@ -206,6 +260,10 @@ function normalizeOp(item: unknown): unknown {
   if (!item || typeof item !== "object") return item;
   const o = { ...(item as Record<string, unknown>) };
   for (const k of Object.keys(o)) if (o[k] === null || o[k] === "") delete o[k];
+  // Accept common synonyms the model sometimes uses.
+  if (o.source === undefined && typeof o.from === "string") o.source = o.from;
+  if (o.target === undefined && typeof o.to === "string") o.target = o.to;
+  if (o.label === undefined && typeof o.name === "string") o.label = o.name;
   if (typeof o.label === "string") o.label = o.label.slice(0, o.type === "connect" || o.type === "update_edge" ? 24 : 40);
   if (typeof o.description === "string") o.description = o.description.slice(0, 280);
   if (typeof o.kind === "string") {

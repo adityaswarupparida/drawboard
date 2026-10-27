@@ -147,7 +147,7 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
             {m.ops.slice(0, 12).map((o, i) => (
               <li key={i}>{o}</li>
             ))}
-            {m.ops.length > 12 && <li>{m.ops.length - 12} more edits</li>}
+            {m.ops.length > 12 && <li>{m.ops.length - 12} more edit{m.ops.length - 12 === 1 ? "" : "s"}</li>}
           </ul>
         )}
         {m.status === "thinking" && !m.text && (

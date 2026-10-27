@@ -48,9 +48,14 @@ export function layeredLayout(nodes: NodeLike[], edges: EdgeLike[]): Map<string,
     layer.set(id, preds.length ? Math.max(...preds.map((p) => layer.get(p)!)) + 1 : 0);
   }
 
+  // Boxes with no connections at all go in a small grid instead of one tall column.
+  const isolated = ids.filter((id) => !out.get(id)!.length && !inc.get(id)!.length);
+  const isolatedSet = new Set(isolated);
+
   // Group into columns, then order each column by the average row of its predecessors.
   const columns: string[][] = [];
   for (const id of ids) {
+    if (isolatedSet.has(id)) continue;
     const l = layer.get(id)!;
     (columns[l] ??= []).push(id);
   }
@@ -67,8 +72,15 @@ export function layeredLayout(nodes: NodeLike[], edges: EdgeLike[]): Map<string,
   });
 
   const result = new Map<string, Pos>();
-  columns.forEach((col, ci) =>
+  const used = columns.filter(Boolean);
+  used.forEach((col, ci) =>
     col.forEach((id) => result.set(id, { x: ci * STEP_X, y: Math.round(row.get(id)! * STEP_Y) })),
+  );
+  const startX = used.length * STEP_X;
+  const perRow = 3;
+  const top = used.length ? -Math.floor(Math.max(...used.map((c) => c.length)) / 2) * STEP_Y : 0;
+  isolated.forEach((id, i) =>
+    result.set(id, { x: startX + (i % perRow) * STEP_X, y: top + Math.floor(i / perRow) * STEP_Y }),
   );
   return result;
 }
