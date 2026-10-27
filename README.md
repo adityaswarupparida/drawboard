@@ -15,14 +15,14 @@ Describe a system ("Design a URL shortener for 100M links a month") by typing or
 - **History and undo.** Every change is logged with its author; undo rolls back the last change.
 - **Workspaces and sharing.** Sign in with email (or GitHub/Google), organise projects into workspaces, invite teammates as owner, editor or viewer, or share a single project with a guest.
 
-## How it maps to the assignment
+## Built with
 
-| Requirement | Implementation |
-|---|---|
-| LLM | Llama 3.3 70B (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) on Workers AI, in JSON mode, for designing, editing, reviewing and writing walkthroughs. Deepgram Flux for live speech-to-text with turn detection, Aura-2 (`@cf/deepgram/aura-2-en`, voice "cora") for speech. |
-| Workflow / coordination | One **Durable Object per project** (`CanvasAgent`, built on the Agents SDK) is the single source of truth: it validates every edit, broadcasts state over WebSockets and serialises AI turns. The **design review** is a Cloudflare **Workflow** with one retried step per review area. |
-| User input via chat or voice | React app (served by the same Worker as static assets) with chat, hands-free voice (Agents SDK `withVoice`) and a React Flow canvas. |
-| Memory or state | Diagram state in the agent's synced state; chat, change history, undo snapshots and "what people changed since the AI last spoke" in the agent's SQLite. Users, workspaces, projects, roles and invites in D1. |
+- **Cloudflare Workers** serves the React app and the API from one Worker, with **Hono** for routing and **Better Auth** for sign-in.
+- **Durable Objects** via the **Agents SDK**: each project gets its own `CanvasAgent`. It holds the diagram, checks every edit, syncs everyone over WebSockets and runs one AI request at a time. Chat, history and undo live in its built-in SQLite.
+- **Workers AI**: Llama 3.3 70B designs, edits, answers questions and writes walkthroughs. Deepgram Flux handles live speech-to-text and Aura-2 does the speaking.
+- **Workflows** runs the design review, one retried step per area.
+- **D1** stores users, workspaces, projects, roles and invites.
+- **React Flow** draws the canvas.
 
 ## Architecture
 
@@ -48,7 +48,7 @@ Key design choice: the AI never rewrites the whole diagram. It returns a list of
 
 ## Run it locally
 
-Requirements: Node 22+, pnpm, a Cloudflare account (Workers AI runs on Cloudflare even in local dev).
+You'll need Node 22+, pnpm and a Cloudflare account (Workers AI runs on Cloudflare even in local dev).
 
 ```bash
 pnpm install
