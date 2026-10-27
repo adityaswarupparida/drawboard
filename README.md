@@ -4,6 +4,12 @@ Design software architecture together with your team and an AI architect, on one
 
 Describe a system ("Design a URL shortener for 100M links a month") by typing or talking, and the AI draws it box by box. Drag, add, rename and connect boxes yourself; the AI sees your edits and keeps working with you. Teammates in the same project see every change, cursor and chat message instantly.
 
+
+
+https://github.com/user-attachments/assets/4bc7ea12-05cb-42ed-a224-a3d17c763e00
+
+
+
 ## What it does
 
 - **Talk to draw.** Ask for a system or a change; Llama 3.3 turns it into small, validated diagram edits that play out live on the canvas.
