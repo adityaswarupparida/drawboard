@@ -22,6 +22,7 @@ import {
 import { connectIsolated, runChatTurn, TTS_MODEL, TTS_SPEAKER, verifyDesign, wantsAnswerOnly, writeTour } from "./ai";
 import type { Env } from "./env";
 import { fallbackWhy, KIND_EXPLAIN, tourKey, tourOrder } from "./tour";
+import { SpeechStream } from "./speech-stream";
 import { FillerFilter } from "./voice-filter";
 
 // `voice` marks the second socket a browser opens for a live voice call.
@@ -177,13 +178,18 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
     // text_message skips beforeCallStart, so the role check is repeated here.
     if (!me || !canEdit(me.role)) return "You have view-only access, so I can't change this diagram.";
     if (this.state.aiBusy) return `I'm still working on ${this.state.aiBusy.for}'s request. Ask me again in a moment.`;
-    const run = () => this.runAiTurn({ id: me.userId, name: me.name }, text);
+    const speech = new SpeechStream();
+    // ctx.signal is ignored: an interruption should stop the speech, not half-finish the edits.
+    const turn = this.runAiTurn({ id: me.userId, name: me.name }, text, [], (t) => speech.update(t)).then(
+      (reply) => speech.finish(reply),
+      () => speech.finish("Sorry, something went wrong. Try again in a moment."),
+    );
+    this.ctx.waitUntil(turn);
     const filler = wantsAnswerOnly(text) ? "Good question, let me take a look. " : "Sure, I'll sketch that out now. ";
     // The filler must end in ". " and be 10+ chars or the TTS splitter holds it until the end.
-    // ctx.signal is ignored: an interruption should stop the speech, not half-finish the edits.
     return (async function* () {
       yield filler;
-      yield speakable(await run());
+      yield* speech.chunks();
     })();
   }
 
@@ -223,7 +229,7 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
 
   /* ---------------- AI ---------------- */
 
-  private async runAiTurn(author: AuthorRef, text: string, selectionIds: string[] = []): Promise<string> {
+  private async runAiTurn(author: AuthorRef, text: string, selectionIds: string[] = [], onReplyText?: (soFar: string) => void): Promise<string> {
     const now = Date.now();
     const before = this.state.diagram;
     const selection = selectionIds
@@ -292,6 +298,7 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
         {
           onOp: applyAi,
           onReply: (t) => {
+            onReplyText?.(t);
             aiMsg.text = t;
             aiMsg.phase = undefined;
             this.upsertChatThrottled(aiMsg);
@@ -674,13 +681,4 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
 function withLayout(d: Diagram): Diagram {
   const pos = layeredLayout(d.nodes, d.edges);
   return { ...d, nodes: d.nodes.map((n) => ({ ...n, ...(pos.get(n.id) ?? {}) })) };
-}
-
-// Spoken replies stay short; the full text is in the chat.
-function speakable(reply: string): string {
-  const plain = reply.replace(/^\s*[•\-*]\s*/gm, "").replace(/\s+/g, " ").trim();
-  if (plain.length <= 420) return plain;
-  const cut = plain.slice(0, 420);
-  const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
-  return `${end > 120 ? cut.slice(0, end + 1) : cut} The rest is in the chat.`;
 }
