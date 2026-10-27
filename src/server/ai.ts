@@ -148,7 +148,9 @@ Rules:
 - "kind" must be one of: ${kinds}.
 - Labels: 1 to 3 words, max 24 characters. Connection labels: 1 or 2 words, max 16 characters, or omit.
 - Never include positions. Layout is automatic.
-- reply: 1 to 4 short sentences in plain language. Be concrete: name tradeoffs and rough numbers. Say what you changed. If people changed the diagram since your last reply, acknowledge it briefly when it matters.
+- reply: 1 to 4 short sentences in plain language. Be concrete: name tradeoffs and rough numbers. Your ops are applied the moment you answer, so describe them in the past tense ("Added a Redis cache in front of Postgres…"). Never promise to do something later. If people changed the diagram since your last reply, acknowledge it briefly when it matters.
+- If the diagram already has what was asked for, don't add it again; say so instead.
+- Text in [square brackets] in earlier messages is a system note about what really happened. Trust it, and never write such notes yourself.
 
 Current diagram:
 ${describeDiagram(diagram)}
@@ -163,22 +165,93 @@ export interface DesignResult {
   highlights: Record<string, Severity>;
 }
 
+const EDIT_WORDS =
+  /\b(add|adding|remove|delete|drop|design (a|an|me|it|for|this|something)|redesign|build|create|draw|sketch|connect|disconnect|wire|replace|rename|change|move|insert|split|merge|introduce|put|swap|include|attach|label|update|fix|make)\b/;
+
+/**
+ * Questions and "explain this" requests go to an answer-only prompt that has no
+ * way to edit the diagram. Llama otherwise tends to "help" by adding boxes.
+ */
+export function wantsAnswerOnly(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  const explain = /\b(explain|describe|walk (me )?through|summari[sz]e|tell me about|what (exactly )?(does|do|is|are)|what's)\b/.test(t);
+  const alsoEdit = /\b(and|then|also) (add|remove|build|design|create|draw|connect|fix|change)\b/.test(t);
+  if (explain && !alsoEdit) return true;
+  const question = /\?\s*$/.test(t) || /^(what|why|how|is|are|does|do|which|where|when|who|should|would|could)\b/.test(t);
+  return question && !EDIT_WORDS.test(t);
+}
+
+const ANSWER_SCHEMA = {
+  type: "object",
+  properties: { reply: DESIGN_SCHEMA.properties.reply, highlights: DESIGN_SCHEMA.properties.highlights },
+  required: ["reply"],
+};
+
+function answerSystemPrompt(diagram: Diagram): string {
+  return `You are Drawboard AI, a senior systems architect helping a team understand the architecture diagram on their shared canvas.
+
+Answer the question. You cannot change the diagram in this reply. If a change would help, suggest it in words and say they can ask you to make it.
+
+Answer with ONLY a JSON object: {"reply": string, "highlights": [{"id": "<box id>", "severity": "critical" | "warning" | "ok"}]}.
+
+How to answer:
+- Base the answer on the current diagram below and refer to boxes by their labels.
+- If asked what the components do, go through EVERY box, one per line, as "• <label>: <what it does in this design and why it is there>".
+- For "what if" questions, explain the impact step by step and name the fix. Highlight the affected boxes (critical = breaks, warning = degraded, ok = keeps working).
+- Plain, concrete language. Short paragraphs or "• " bullet lines. Stay under about 200 words unless you are listing every box.
+- If the canvas is empty, say so and offer to design something.
+- Text in [square brackets] in earlier messages is a system note about what really happened. Trust it, and never write such notes yourself.
+
+Current diagram:
+${describeDiagram(diagram)}`;
+}
+
 export async function runDesignTurn(
   ai: Ai,
   args: { diagram: Diagram; chat: ChatMessage[]; humanChanges: string[]; userName: string; text: string },
 ): Promise<DesignResult> {
+  // Tell the model what each earlier AI reply actually did, so it can't talk itself
+  // into thinking the diagram was never built.
   const history = args.chat
     .filter((m) => m.role !== "system" && m.status !== "thinking" && m.text)
     .slice(-8)
-    .map((m) =>
-      m.role === "ai"
-        ? { role: "assistant" as const, content: m.text }
-        : { role: "user" as const, content: `${m.author.name}: ${m.text}` },
-    );
+    .map((m) => {
+      if (m.role !== "ai") return { role: "user" as const, content: `${m.author.name}: ${m.text}` };
+      const note = m.findings
+        ? "[This was a design review; it pinned notes to boxes]"
+        : m.ops?.length
+          ? `[Edits applied to the diagram: ${m.ops.slice(0, 25).join("; ")}${m.ops.length > 25 ? `; and ${m.ops.length - 25} more` : ""}]`
+          : "[No diagram edits were made in this reply]";
+      return { role: "assistant" as const, content: `${m.text}\n${note}` };
+    });
+  const n = args.diagram.nodes.length;
+  const reminder = n
+    ? `[The canvas currently has ${n} boxes: ${args.diagram.nodes.slice(0, 30).map((x) => x.label).join(", ")}]`
+    : "[The canvas is currently empty]";
+
+  if (wantsAnswerOnly(args.text)) {
+    const raw = (await runJson(
+      ai,
+      [
+        { role: "system" as const, content: answerSystemPrompt(args.diagram) },
+        ...history,
+        { role: "user" as const, content: `${args.userName}: ${args.text}\n\n${reminder}` },
+      ],
+      ANSWER_SCHEMA,
+      1600,
+    )) as { reply?: unknown; highlights?: unknown };
+    return {
+      reply: typeof raw.reply === "string" && raw.reply.trim() ? raw.reply.trim() : "Sorry, I couldn't put an answer together. Try asking again.",
+      ops: [],
+      rejected: [],
+      highlights: parseHighlights(raw.highlights),
+    };
+  }
+
   const messages = [
     { role: "system" as const, content: designSystemPrompt(args.diagram, args.humanChanges) },
     ...history,
-    { role: "user" as const, content: `${args.userName}: ${args.text}` },
+    { role: "user" as const, content: `${args.userName}: ${args.text}\n\n${reminder}` },
   ];
   const raw = (await runJson(ai, messages, DESIGN_SCHEMA, 2048)) as {
     reply?: unknown;
@@ -193,12 +266,7 @@ export async function runDesignTurn(
     if (r.success) ops.push(r.data);
     else rejected.push(JSON.stringify(item).slice(0, 120));
   }
-  const highlights: Record<string, Severity> = {};
-  for (const h of Array.isArray(raw.highlights) ? raw.highlights : []) {
-    const id = (h as { id?: unknown }).id;
-    const sev = (h as { severity?: unknown }).severity;
-    if (typeof id === "string" && (sev === "critical" || sev === "warning" || sev === "ok")) highlights[id] = sev;
-  }
+  const highlights = parseHighlights(raw.highlights);
   // Llama sometimes adds a batch of boxes and forgets to wire them up. Ask once more for just the connections.
   const added = ops.filter((o) => o.type === "add_node");
   const connects = ops.filter((o) => o.type === "connect").length;
@@ -251,6 +319,16 @@ Connect them the way requests and data actually flow (client -> edge/gateway -> 
   for (const c of Array.isArray(raw.connections) ? raw.connections.slice(0, 40) : []) {
     const r = OpSchema.safeParse(normalizeOp({ type: "connect", ...(c as object) }));
     if (r.success) out.push(r.data);
+  }
+  return out;
+}
+
+function parseHighlights(list: unknown): Record<string, Severity> {
+  const out: Record<string, Severity> = {};
+  for (const h of Array.isArray(list) ? list : []) {
+    const id = (h as { id?: unknown }).id;
+    const sev = (h as { severity?: unknown }).severity;
+    if (typeof id === "string" && (sev === "critical" || sev === "warning" || sev === "ok")) out[id] = sev;
   }
   return out;
 }
