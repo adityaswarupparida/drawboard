@@ -1,0 +1,228 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AI_AUTHOR, colorFor, type CanvasState, type ChatMessage, type HistoryEntry } from "../../shared/protocol";
+import { api } from "../api";
+import { Avatar, clock } from "../components/ui";
+import { MicIcon } from "../icons";
+
+interface Props {
+  projectId: string;
+  meId: string;
+  state: CanvasState;
+  chat: ChatMessage[];
+  history: HistoryEntry[];
+  canEdit: boolean;
+  connected: boolean;
+  onSend: (text: string) => void;
+  onReview: () => void;
+  showToast: (t: string) => void;
+}
+
+const EMPTY_PROMPTS = [
+  "Design a URL shortener for 100M new links a month",
+  "Design a chat app like WhatsApp",
+  "Design a ride-sharing backend",
+];
+const FULL_PROMPTS = [
+  "What happens if the database goes down?",
+  "How would this handle 10x traffic?",
+  "Add caching where it helps most",
+];
+
+export function SidePanel({ projectId, meId, state, chat, history, canEdit, connected, onSend, onReview, showToast }: Props) {
+  const [tab, setTab] = useState<"chat" | "history">("chat");
+  const [text, setText] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
+  const voice = useVoice(projectId, (t) => (t ? onSend(t) : showToast("I didn't catch that. Try again a bit closer to the mic.")), showToast);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chat, tab]);
+
+  const busy = !!state.aiBusy;
+  const disabled = !canEdit || !connected || busy;
+  const prompts = state.diagram.nodes.length ? FULL_PROMPTS : EMPTY_PROMPTS;
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const t = text.trim();
+    if (!t || disabled) return;
+    onSend(t);
+    setText("");
+  };
+
+  return (
+    <aside className="side" aria-label="Chat and history">
+      <div className="tabs" role="tablist">
+        <button type="button" role="tab" className={tab === "chat" ? "on" : ""} onClick={() => setTab("chat")}>Chat</button>
+        <button type="button" role="tab" className={tab === "history" ? "on" : ""} onClick={() => setTab("history")}>
+          History <span>{history.length || ""}</span>
+        </button>
+      </div>
+
+      {tab === "chat" ? (
+        <div className="chat" ref={listRef} aria-live="polite">
+          {!chat.length && (
+            <div className="sys">
+              {canEdit ? "Ask the AI to design something, change the diagram, or explain a tradeoff. Everyone in this project sees the conversation." : "The conversation about this design will show up here."}
+            </div>
+          )}
+          {chat.map((m) => (
+            <Message key={m.id} m={m} mine={m.author.id === meId} />
+          ))}
+        </div>
+      ) : (
+        <ol className="hist">
+          {!history.length && <li className="muted" style={{ display: "block", border: 0 }}>No changes yet.</li>}
+          {history.map((h) => (
+            <li key={h.id}>
+              <i style={{ background: h.by.ai ? "var(--ai)" : colorFor(h.by.id) }} />
+              <span><b>{h.by.ai ? "AI" : h.by.name}</b> {h.summary}</span>
+              <time>{clock(h.at)}</time>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <div className="composer">
+        {canEdit ? (
+          <>
+            <div className="chips">
+              {prompts.map((p) => (
+                <button key={p} type="button" className="chip" disabled={disabled} onClick={() => onSend(p)}>{p}</button>
+              ))}
+              {state.diagram.nodes.length > 0 && (
+                <button type="button" className="chip" disabled={!connected || state.review.status === "running"} onClick={onReview}>Review this design</button>
+              )}
+            </div>
+            {voice.status !== "idle" && (
+              <div className="listen">
+                {voice.status === "recording" ? "Listening… click the mic again when you're done." : "Turning your voice into text…"}
+              </div>
+            )}
+            {busy && <div className="listen">The AI is working on {state.aiBusy!.for}'s request…</div>}
+            <form onSubmit={submit}>
+              <button
+                type="button"
+                className={`mic${voice.status === "recording" ? " on" : ""}`}
+                onClick={voice.toggle}
+                disabled={disabled || voice.status === "transcribing"}
+                aria-label={voice.status === "recording" ? "Stop recording" : "Talk instead of typing"}
+                title={voice.status === "recording" ? "Stop recording" : "Talk instead of typing"}
+              >
+                <MicIcon />
+              </button>
+              <input
+                id="chat-input"
+                className="input"
+                value={text}
+                maxLength={2000}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Ask a question or describe a change"
+                aria-label="Message the AI"
+                disabled={!canEdit || !connected}
+              />
+              <button className="send" type="submit" disabled={disabled || !text.trim()}>Send</button>
+            </form>
+          </>
+        ) : (
+          <div className="muted" style={{ fontSize: "0.86rem" }}>You have view-only access, so you can't chat with the AI here.</div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
+  if (m.role === "system") return <div className="sys">{m.text}</div>;
+  if (m.role === "ai") {
+    return (
+      <div className={`m ai${m.status === "error" ? " error" : ""}`}>
+        <div className="mh">
+          <span className="pp ai sm">AI</span>
+          <b>{AI_AUTHOR.name}</b>
+        </div>
+        {m.ops && m.ops.length > 0 && (
+          <ul className="ops">
+            {m.ops.slice(0, 12).map((o, i) => (
+              <li key={i}>{o}</li>
+            ))}
+            {m.ops.length > 12 && <li>{m.ops.length - 12} more edits</li>}
+          </ul>
+        )}
+        {m.status === "thinking" && !m.text && (
+          <div className="think">
+            <span className="dots"><i /><i /><i /></span>
+            {m.ops?.length ? "Drawing" : "Thinking"}
+          </div>
+        )}
+        {m.text && <p>{m.text}</p>}
+        {m.findings && m.findings.length > 0 && (
+          <ul className="rlist">
+            {m.findings.map((f, i) => (
+              <li key={i}>
+                <span className={`sev ${f.severity}`}>{f.severity} · {f.area} · {f.nodeLabel}</span>
+                <span><b>{f.title}.</b> {f.detail}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {m.meta && <div className="meta">{m.meta}</div>}
+      </div>
+    );
+  }
+  return (
+    <div className={`m ${mine ? "mine" : "other"}`}>
+      <div className="mh">
+        <Avatar id={m.author.id} name={m.author.name} small />
+        <b>{mine ? "You" : m.author.name}</b>
+        <span>{clock(m.createdAt)}</span>
+      </div>
+      <p>{m.text}</p>
+    </div>
+  );
+}
+
+/** Push-to-talk: record in the browser, transcribe with Whisper on the server. */
+function useVoice(projectId: string, onText: (t: string) => void, onError: (msg: string) => void) {
+  const [status, setStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  const rec = useRef<MediaRecorder | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const stop = () => {
+    clearTimeout(timer.current);
+    if (rec.current && rec.current.state !== "inactive") rec.current.stop();
+  };
+
+  const start = async () => {
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      onError("Microphone access was blocked. Allow it in your browser to talk to the AI.");
+      return;
+    }
+    const chunks: BlobPart[] = [];
+    const r = new MediaRecorder(stream);
+    r.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    r.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      setStatus("transcribing");
+      try {
+        const text = await api.transcribe(projectId, new Blob(chunks, { type: r.mimeType || "audio/webm" }));
+        onText(text);
+      } catch (e) {
+        onError((e as Error).message);
+      } finally {
+        setStatus("idle");
+      }
+    };
+    rec.current = r;
+    r.start();
+    setStatus("recording");
+    timer.current = setTimeout(stop, 30_000); // keep recordings short
+  };
+
+  const toggle = () => (status === "recording" ? stop() : status === "idle" ? void start() : undefined);
+  return { status, toggle };
+}
