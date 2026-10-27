@@ -12,7 +12,7 @@ import type {
   WorkspaceSummary,
 } from "../shared/protocol";
 import { atLeast, projectAccess, workspaceRole } from "./access";
-import { transcribe } from "./ai";
+import { transcribe, TTS_MODEL, TTS_SPEAKER } from "./ai";
 import { getDb, type DB } from "./db";
 import { invite, project, projectGuest, workspace, workspaceMember } from "./db/app-schema";
 import { user } from "./db/auth-schema";
@@ -268,6 +268,22 @@ api.delete("/projects/:id/guests/:userId", async (c) => {
   if (!acc || acc.guest || !atLeast(acc.role, "editor")) return c.json(bad("You can't manage guests here."), 403);
   await db.delete(projectGuest).where(and(eq(projectGuest.projectId, id), eq(projectGuest.userId, userId)));
   return c.body(null, 204);
+});
+
+// Narration for the walkthrough, in the same voice as live calls. Viewers may use it.
+api.post("/projects/:id/speak", async (c) => {
+  const acc = await projectAccess(getDb(c.env), c.req.param("id"), c.get("user")!.id);
+  if (!acc) return c.json(bad("Project not found."), 404);
+  const b = await body(c.req.raw, z.object({ text: z.string().trim().min(1).max(1200) }));
+  if (!b) return c.json(bad("Nothing to read."), 400);
+  try {
+    const res = (await c.env.AI.run(TTS_MODEL as never, { text: b.text, speaker: TTS_SPEAKER } as never, { returnRawResponse: true } as never)) as unknown as Response;
+    if (!res.ok || !res.body) throw new Error(`TTS ${res.status}`);
+    return new Response(res.body, { headers: { "content-type": res.headers.get("content-type") ?? "audio/mpeg", "cache-control": "private, max-age=3600" } });
+  } catch (e) {
+    console.error("speak failed", e);
+    return c.json(bad("Narration isn't available right now."), 502);
+  }
 });
 
 api.post("/projects/:id/transcribe", async (c) => {

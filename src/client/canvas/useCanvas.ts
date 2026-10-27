@@ -7,6 +7,7 @@ import type {
   HistoryEntry,
   Presence,
   ServerMessage,
+  Tour,
 } from "../../shared/protocol";
 
 export type XY = { x: number; y: number };
@@ -21,6 +22,7 @@ export function useCanvas(projectId: string) {
   const [remoteDrags, setRemoteDrags] = useState<Record<string, XY>>({});
   const [connected, setConnected] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [tour, setTour] = useState<Tour | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const dragTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -89,6 +91,9 @@ export function useCanvas(projectId: string) {
           );
           break;
         }
+        case "tour":
+          setTour(msg.tour);
+          break;
         case "error":
           showToast(msg.message);
           break;
@@ -120,7 +125,7 @@ export function useCanvas(projectId: string) {
     [agent],
   );
 
-  return { state, me, chat, history, presence, cursors, remoteDrags, connected, toast, showToast, send };
+  return { state, me, chat, history, presence, cursors, remoteDrags, connected, toast, showToast, send, tour, setTour };
 }
 
 /** Calls fn at most once per `ms`, always delivering the latest arguments. */

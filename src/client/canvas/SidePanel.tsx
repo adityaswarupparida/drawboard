@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AI_AUTHOR, colorFor, type CanvasState, type ChatMessage, type HistoryEntry } from "../../shared/protocol";
 import { useVoiceAgent } from "agents/voice/react";
 import { Avatar, clock } from "../components/ui";
@@ -37,6 +37,19 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const voice = useLiveVoice(projectId, showToast);
+  const [allEdits, setAllEdits] = useState(false);
+  const toggleEdits = useCallback(() => setAllEdits((v) => !v), []);
+
+  // Ctrl+O shows every edit, like expanding tool output in an agent chat. Cmd+O works too on a Mac.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "o") return;
+      e.preventDefault();
+      toggleEdits();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleEdits]);
 
   useEffect(() => {
     const el = listRef.current;
@@ -76,7 +89,7 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
             </div>
           )}
           {chat.map((m) => (
-            <Message key={m.id} m={m} mine={m.author.id === meId} />
+            <Message key={m.id} m={m} mine={m.author.id === meId} allEdits={allEdits} onToggleEdits={toggleEdits} />
           ))}
         </div>
       ) : (
@@ -151,7 +164,7 @@ export function SidePanel({ projectId, meId, state, chat, history, canEdit, conn
   );
 }
 
-function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
+function Message({ m, mine, allEdits, onToggleEdits }: { m: ChatMessage; mine: boolean; allEdits: boolean; onToggleEdits: () => void }) {
   if (m.role === "system") return <div className="sys">{m.text}</div>;
   if (m.role === "ai") {
     return (
@@ -160,14 +173,7 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
           <span className="pp ai sm">AI</span>
           <b>{AI_AUTHOR.name}</b>
         </div>
-        {m.ops && m.ops.length > 0 && (
-          <ul className="ops">
-            {m.ops.slice(0, 12).map((o, i) => (
-              <li key={i}>{o}</li>
-            ))}
-            {m.ops.length > 12 && <li>{m.ops.length - 12} more edit{m.ops.length - 12 === 1 ? "" : "s"}</li>}
-          </ul>
-        )}
+        {m.ops && m.ops.length > 0 && <OpsList ops={m.ops} open={allEdits} onToggle={onToggleEdits} />}
         {m.text && <p className={m.status === "thinking" && !m.phase ? "typing" : undefined}>{m.text}</p>}
         {m.status === "thinking" && (m.phase || !m.text) && (
           <div className="think">
@@ -202,6 +208,27 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
   );
 }
 
+/** Shows only the latest edit (it updates live while the AI draws), with the rest behind "+N more". */
+function OpsList({ ops, open, onToggle }: { ops: string[]; open: boolean; onToggle: () => void }) {
+  const rest = ops.length - 1;
+  const shown = open ? ops : ops.slice(-1);
+  return (
+    <ul className="ops">
+      {shown.map((o, i) => (
+        <li key={open ? i : ops.length}>{o}</li>
+      ))}
+      {rest > 0 && (
+        <li className="more">
+          <button type="button" onClick={onToggle} aria-expanded={open}>
+            {open ? "Show less" : `+${rest} more edit${rest === 1 ? "" : "s"}`}
+          </button>
+          <kbd>ctrl+o</kbd>
+        </li>
+      )}
+    </ul>
+  );
+}
+
 /**
  * Hands-free voice: the SDK streams mic audio to the canvas agent on a second socket,
  * which transcribes turns, runs them as chat requests and speaks a short reply.
@@ -209,7 +236,8 @@ function Message({ m, mine }: { m: ChatMessage; mine: boolean }) {
 function useLiveVoice(projectId: string, onError: (msg: string) => void) {
   const [on, setOn] = useState(false);
   const started = useRef(false);
-  const voice = useVoiceAgent({ agent: "canvas-agent", name: projectId, query: { voice: "1" }, enabled: on });
+  // Mic chunks are 100 ms, so 5 chunks means half a second of speech before the AI stops talking.
+  const voice = useVoiceAgent({ agent: "canvas-agent", name: projectId, query: { voice: "1" }, enabled: on, interruptChunks: 5, interruptThreshold: 0.06 });
 
   useEffect(() => {
     if (!on || !voice.connected || started.current) return;

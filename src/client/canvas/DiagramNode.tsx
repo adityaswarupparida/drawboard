@@ -9,6 +9,7 @@ export type DiagramNodeData = {
   annotation?: Annotation;
   highlight?: Severity;
   fresh?: boolean;
+  tour?: "on" | "dim";
 };
 export type DiagramFlowNode = Node<DiagramNodeData, "dnode">;
 
@@ -22,9 +23,9 @@ const SIDES = [
 export const authorColor = (by: DNode["by"]) => (by.ai ? "var(--ai)" : colorFor(by.id));
 
 function DiagramNodeView({ data, selected }: NodeProps<DiagramFlowNode>) {
-  const { node, annotation, highlight, fresh } = data;
+  const { node, annotation, highlight, fresh, tour } = data;
   const color = authorColor(node.by);
-  const cls = ["dnode", selected ? "selected" : "", highlight ? `hl-${highlight}` : "", fresh ? "fresh" : ""].join(" ");
+  const cls = ["dnode", selected ? "selected" : "", highlight ? `hl-${highlight}` : "", fresh ? "fresh" : "", tour ? `tour-${tour}` : ""].join(" ");
   return (
     <div className={cls} style={{ ["--fresh" as string]: color }} title={node.description || undefined}>
       {annotation && (

@@ -32,9 +32,13 @@ interface Props {
   remoteDrags: Record<string, XY>;
   selNodes: string[];
   setSelNodes: React.Dispatch<React.SetStateAction<string[]>>;
+  /** Walkthrough spotlight: a box id, "all" for the overview, or null when no tour is running. */
+  tourFocus: string | null;
+  onNodeClick: (id: string) => void;
+  overlay?: React.ReactNode;
 }
 
-export function Board({ state, canEdit, connected, send, presence, cursors, remoteDrags, selNodes, setSelNodes }: Props) {
+export function Board({ state, canEdit, connected, send, presence, cursors, remoteDrags, selNodes, setSelNodes, tourFocus, onNodeClick, overlay }: Props) {
   const rf = useReactFlow();
   const wrapRef = useRef<HTMLDivElement>(null);
   const diagram = state.diagram;
@@ -76,6 +80,32 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
     wasBusy.current = !!state.aiBusy;
   }, [state.aiBusy, diagram.nodes.length, rf]);
 
+  const nodesRef = useRef(diagram.nodes);
+  nodesRef.current = diagram.nodes;
+  // Pan only when the stop changes, not on every edit while a tour is open.
+  useEffect(() => {
+    if (!tourFocus) return;
+    if (tourFocus === "all") {
+      rf.fitView({ padding: 0.3, duration: 600, maxZoom: 1 });
+      return;
+    }
+    const n = nodesRef.current.find((x) => x.id === tourFocus);
+    if (!n) return;
+    const zoom = 1.05;
+    // Aim a little below the box so it sits above the walkthrough card.
+    rf.setCenter(n.x + NODE_W / 2, n.y + NODE_H / 2 + 130 / zoom, { zoom, duration: 600 });
+  }, [tourFocus, rf]);
+
+  const spot = useMemo(() => {
+    if (!tourFocus || tourFocus === "all") return null;
+    const near = new Set([tourFocus]);
+    for (const e of diagram.edges) {
+      if (e.source === tourFocus) near.add(e.target);
+      if (e.target === tourFocus) near.add(e.source);
+    }
+    return near;
+  }, [tourFocus, diagram.edges]);
+
   // Keep the local drag position until the server echoes it back, so boxes don't snap back.
   useEffect(() => {
     setLocalPos((prev) => {
@@ -101,7 +131,13 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
       id: n.id,
       type: "dnode",
       position: localPos[n.id] ?? remoteDrags[n.id] ?? { x: n.x, y: n.y },
-      data: { node: n, annotation: ann.get(n.id), highlight: state.highlights[n.id], fresh: fresh.has(n.id) },
+      data: {
+        node: n,
+        annotation: ann.get(n.id),
+        highlight: state.highlights[n.id],
+        fresh: fresh.has(n.id),
+        tour: !spot ? undefined : n.id === tourFocus ? "on" : spot.has(n.id) ? undefined : "dim",
+      },
       selected: selNodes.includes(n.id),
       draggable: canEdit,
       connectable: canEdit,
@@ -109,7 +145,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
       width: NODE_W,
       height: NODE_H,
     }));
-  }, [diagram.nodes, state.annotations, state.highlights, localPos, remoteDrags, fresh, selNodes, canEdit]);
+  }, [diagram.nodes, state.annotations, state.highlights, localPos, remoteDrags, fresh, selNodes, canEdit, spot, tourFocus]);
 
   const edges: Edge[] = useMemo(() => {
     const pos = new Map(nodes.map((n) => [n.id, n.position]));
@@ -129,8 +165,11 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
           targetHandle = dy > 0 ? "t-top" : "t-bottom";
         }
       }
+      const hot = spot && (e.source === tourFocus || e.target === tourFocus);
       return {
         id: e.id,
+        className: spot ? (hot ? "tour-hot" : "tour-dim") : undefined,
+        animated: !!hot,
         source: e.source,
         target: e.target,
         sourceHandle,
@@ -143,7 +182,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
         labelBgBorderRadius: 3,
       };
     });
-  }, [diagram.edges, nodes, selEdges, canEdit]);
+  }, [diagram.edges, nodes, selEdges, canEdit, spot, tourFocus]);
 
   const sendDrag = useThrottle((id: string, p: XY) => send({ type: "drag", id, x: p.x, y: p.y }), 60);
   const sendCursor = useThrottle((p: XY) => send({ type: "cursor", x: Math.round(p.x), y: Math.round(p.y) }), 50);
@@ -293,6 +332,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeDragStop={onNodeDragStop}
+          onNodeClick={(_, n) => onNodeClick(n.id)}
           onConnect={onConnect}
           onDelete={onDelete}
           connectionMode={ConnectionMode.Loose}
@@ -306,7 +346,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
         >
           <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--grid)" />
           <Controls showInteractive={false} />
-          <MiniMap pannable zoomable nodeColor="var(--node-stroke)" maskColor="rgba(120,130,140,0.12)" />
+          {!tourFocus && <MiniMap pannable zoomable nodeColor="var(--node-stroke)" maskColor="rgba(120,130,140,0.12)" />}
           <ViewportPortal>
             {Object.entries(cursors).map(([cid, p]) => {
               const u = presence.find((x) => x.connectionId === cid);
@@ -322,6 +362,7 @@ export function Board({ state, canEdit, connected, send, presence, cursors, remo
             })}
           </ViewportPortal>
         </ReactFlow>
+        {overlay}
         {empty && (
           <div className="empty-canvas">
             <div>

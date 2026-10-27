@@ -17,9 +17,12 @@ import {
   type Presence,
   type Role,
   type ServerMessage,
+  type Tour,
 } from "../shared/protocol";
-import { connectIsolated, runChatTurn, verifyDesign, wantsAnswerOnly } from "./ai";
+import { connectIsolated, runChatTurn, TTS_MODEL, TTS_SPEAKER, verifyDesign, wantsAnswerOnly, writeTour } from "./ai";
 import type { Env } from "./env";
+import { fallbackWhy, KIND_EXPLAIN, tourKey, tourOrder } from "./tour";
+import { FillerFilter } from "./voice-filter";
 
 // `voice` marks the second socket a browser opens for a live voice call.
 type ConnState = { userId: string; name: string; role: Role; color: string; voice?: boolean };
@@ -38,11 +41,15 @@ const isVoiceRequest = (req: Request) => new URL(req.url).searchParams.get("voic
 const VoiceAgent = withVoice(Agent);
 
 export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
-  // Flux does its own turn detection; keyterms help it spell architecture jargon.
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    keyterms: ["Postgres", "Redis", "Kafka", "CDN", "load balancer", "API gateway", "WebSocket", "Cassandra", "S3", "R2", "D1"],
-  });
-  tts = new WorkersAITTS(this.env.AI, { speaker: "asteria" });
+  // Flux does its own turn detection; a higher threshold lets people pause mid-thought.
+  transcriber = new FillerFilter(
+    new WorkersAIFluxSTT(this.env.AI, {
+      eotThreshold: 0.8,
+      keyterms: ["Postgres", "Redis", "Kafka", "CDN", "load balancer", "API gateway", "WebSocket", "Cassandra", "S3", "R2", "D1"],
+    }),
+    () => /\?\s*$/.test(this.loadChat(1)[0]?.text ?? ""),
+  );
+  tts = new WorkersAITTS(this.env.AI, { model: TTS_MODEL, speaker: TTS_SPEAKER });
 
   initialState: CanvasState = {
     diagram: emptyDiagram(),
@@ -59,6 +66,7 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
     this.sql`CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS snapshots (seq INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT NOT NULL, by_name TEXT NOT NULL, diagram TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS pending_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS tours (key TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL)`;
     // A restart mid AI turn would otherwise leave the "AI is working" flag stuck.
     if (this.state.aiBusy) this.setState({ ...this.state, aiBusy: null });
   }
@@ -121,6 +129,8 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
       this.emit({ type: "cursor_leave", connectionId: conn.id }, [conn.id]);
       return;
     }
+    // Tours only read the diagram, so viewers can take one too.
+    if (msg.type === "tour") return this.requestTour(conn);
 
     if (!canEdit(me.role)) {
       this.sendTo(conn, { type: "error", message: "You have view-only access to this project." });
@@ -162,17 +172,13 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
     return !!conn.state && canEdit(conn.state.role);
   }
 
-  afterTranscribe(text: string) {
-    return text.trim().length < 3 ? null : text;
-  }
-
   async onTurn(text: string, ctx: VoiceTurnContext) {
     const me = (ctx.connection as Connection<ConnState>).state;
     // text_message skips beforeCallStart, so the role check is repeated here.
     if (!me || !canEdit(me.role)) return "You have view-only access, so I can't change this diagram.";
     if (this.state.aiBusy) return `I'm still working on ${this.state.aiBusy.for}'s request. Ask me again in a moment.`;
     const run = () => this.runAiTurn({ id: me.userId, name: me.name }, text);
-    const filler = wantsAnswerOnly(text) ? "Let me take a look. " : "On it, drawing that now. ";
+    const filler = wantsAnswerOnly(text) ? "Good question, let me take a look. " : "Sure, I'll sketch that out now. ";
     // The filler must end in ". " and be 10+ chars or the TTS splitter holds it until the end.
     // ctx.signal is ignored: an interruption should stop the speech, not half-finish the edits.
     return (async function* () {
@@ -407,6 +413,82 @@ export class CanvasAgent extends VoiceAgent<Env, CanvasState> {
     }
     if (!fixed) return "self-check passed";
     return note && !/looks good/i.test(note) ? `self-check: ${note.replace(/\.$/, "").toLowerCase()}` : "self-check fixed issues";
+  }
+
+  /* ---------------- walkthrough ---------------- */
+
+  private tourJobs = new Map<string, { tour: Tour; waiters: Set<string> }>();
+
+  private requestTour(conn: Connection<ConnState>) {
+    const diagram = this.state.diagram;
+    if (!diagram.nodes.length) {
+      this.sendTo(conn, { type: "error", message: "There's nothing to walk through yet." });
+      return;
+    }
+    const key = tourKey(diagram);
+    const running = this.tourJobs.get(key);
+    if (running) {
+      running.waiters.add(conn.id);
+      this.sendTo(conn, { type: "tour", tour: running.tour });
+      return;
+    }
+    const cached = this.sql<{ data: string }>`SELECT data FROM tours WHERE key = ${key}`[0];
+    if (cached) {
+      this.sendTo(conn, { type: "tour", tour: JSON.parse(cached.data) as Tour });
+      return;
+    }
+
+    const order = tourOrder(diagram);
+    // The order goes out right away so the client can start moving before any text exists.
+    const tour: Tour = { intro: "", steps: order.map((nodeId) => ({ nodeId, what: "", why: "" })), outro: "", done: false };
+    const job = { tour, waiters: new Set([conn.id]) };
+    this.tourJobs.set(key, job);
+    const push = () => {
+      for (const id of job.waiters) {
+        const c = this.getConnection(id);
+        if (c) this.sendTo(c, { type: "tour", tour });
+      }
+    };
+    push();
+
+    const byLabel = new Map(diagram.nodes.map((n) => [n.label.toLowerCase(), n.id]));
+    const run = async () => {
+      let ok = true;
+      try {
+        tour.outro = await writeTour(this.env.AI, diagram, order, {
+          onIntro: (t) => {
+            tour.intro = t;
+            push();
+          },
+          onStep: (ref, what, why) => {
+            const step = tour.steps.find((s) => s.nodeId === (byLabel.get(ref.toLowerCase()) ?? ref));
+            if (!step || step.what) return;
+            step.what = what;
+            step.why = why;
+            push();
+          },
+        });
+      } catch (err) {
+        console.error("tour failed", err);
+        ok = false;
+      }
+      for (const s of tour.steps) {
+        const n = diagram.nodes.find((x) => x.id === s.nodeId);
+        if (!s.what && n) s.what = KIND_EXPLAIN[n.kind];
+        if (!s.why) s.why = fallbackWhy(diagram, s.nodeId);
+      }
+      if (!tour.intro) tour.intro = `This design has ${diagram.nodes.length} parts. We'll follow a request from where it starts to where its data ends up.`;
+      if (!tour.outro) tour.outro = "That's the whole path. Try asking the AI what happens if one of these boxes fails.";
+      tour.done = true;
+      // A failed call isn't cached, so the next request tries the model again.
+      if (ok) {
+        this.sql`INSERT OR REPLACE INTO tours (key, at, data) VALUES (${key}, ${Date.now()}, ${JSON.stringify(tour)})`;
+        this.sql`DELETE FROM tours WHERE key NOT IN (SELECT key FROM tours ORDER BY at DESC LIMIT 10)`;
+      }
+      push();
+      this.tourJobs.delete(key);
+    };
+    this.ctx.waitUntil(run());
   }
 
   /* ---------------- design review (Workflow) ---------------- */

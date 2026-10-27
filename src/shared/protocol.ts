@@ -48,6 +48,19 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+// A guided tour of the diagram, in the order requests flow. Text fills in while the AI writes it.
+export interface TourStep {
+  nodeId: string;
+  what: string;
+  why: string;
+}
+export interface Tour {
+  intro: string;
+  steps: TourStep[];
+  outro: string;
+  done: boolean;
+}
+
 export interface HistoryEntry {
   id: string;
   at: number;
@@ -71,6 +84,7 @@ export type ClientMessage =
   | { type: "drag"; id: string; x: number; y: number }
   | { type: "undo" }
   | { type: "review" }
+  | { type: "tour" }
   | { type: "tidy" };
 
 export type ServerMessage =
@@ -86,6 +100,7 @@ export type ServerMessage =
   | { type: "cursor"; connectionId: string; x: number; y: number }
   | { type: "cursor_leave"; connectionId: string }
   | { type: "drag"; connectionId: string; id: string; x: number; y: number }
+  | { type: "tour"; tour: Tour }
   | { type: "error"; message: string };
 
 export interface WorkspaceSummary {

@@ -4,6 +4,9 @@ import { scanPartial } from "./json-stream";
 
 export const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 export const VOICE_MODEL = "@cf/openai/whisper-large-v3-turbo" as const;
+// Aura-2 sounds far less clipped than Aura-1; "cora" is one of its calmer, warmer voices.
+export const TTS_MODEL = "@cf/deepgram/aura-2-en";
+export const TTS_SPEAKER = "cora";
 
 type Msg = { role: "system" | "user" | "assistant"; content: string };
 
@@ -512,6 +515,84 @@ Give at most 3 findings, the most important first. Only report real issues visib
     });
   }
   return out;
+}
+
+const TOUR_SCHEMA = {
+  type: "object",
+  properties: {
+    intro: { type: "string" },
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: { type: "string" }, what: { type: "string" }, why: { type: "string" } },
+        required: ["id", "what", "why"],
+      },
+    },
+    outro: { type: "string" },
+  },
+  required: ["intro", "steps", "outro"],
+};
+
+export interface TourHandlers {
+  onIntro: (text: string) => void;
+  onStep: (id: string, what: string, why: string) => void;
+}
+
+/** Writes a beginner-friendly explanation for each box, in the given order. Returns the closing line. */
+export async function writeTour(ai: Ai, diagram: Diagram, order: string[], h: TourHandlers): Promise<string> {
+  const byId = new Map(diagram.nodes.map((n) => [n.id, n]));
+  const stops = order.map((id) => byId.get(id)!).filter(Boolean);
+  const messages: Msg[] = [
+    {
+      role: "system",
+      content: `You are a friendly teacher giving a guided tour of a software architecture diagram to someone who is new to system design. Assume they know what a website and a server are, and nothing more.
+
+Return ONLY JSON: {"intro": string, "steps": [{"id": "<box id>", "what": string, "why": string}], "outro": string}.
+
+- intro: 2 short sentences (under 45 words). What the system does for the people using it, then the main path a request takes, by box label.
+- steps: one per box, in EXACTLY the order given, using the exact ids.
+  - what: 2 short sentences (25 to 45 words). What THIS box does, judged by its label and notes, in plain words. If it uses a known technology (Redis, Kafka, Postgres, S3), say in a few words what that is. End with an everyday analogy when it helps.
+  - why: 2 short sentences (25 to 45 words). Why this design needs it: the problem it solves here and what would go wrong without it. Don't just list what it connects to; the reader can see the arrows.
+- outro: 2 short sentences (under 40 words). Sum up the journey in one line, then suggest one specific "what if" question to ask the AI next.
+- Warm, simple, concrete. Short sentences: never join two sentences with a comma. No markdown, no bullet characters.
+
+Example steps:
+{"id":"matching","what":"The Matching Service pairs each ride request with a nearby free driver. It's the matchmaker of the app, a bit like a taxi dispatcher with a live map.","why":"Matching has to happen in seconds while thousands of drivers move around. Keeping it in its own service means it can scale up at rush hour without slowing payments or sign-ups."}
+{"id":"redis","what":"Redis is an in-memory store, which means it keeps data in RAM and answers in under a millisecond. Here it acts as a cache: a quick-access copy of popular data, like keeping your keys by the door.","why":"Most visits ask for the same popular links. Checking Redis first keeps pages fast and stops Postgres from being flooded with the same reads."}`,
+    },
+    {
+      role: "user",
+      content: `${describeDiagram(diagram)}\n\nTour order (ids): ${stops.map((n) => n.id).join(", ")}`,
+    },
+  ];
+  const maxTokens = Math.min(4000, 300 + stops.length * 150);
+  let emitted = 0;
+  let introSent = false;
+  const emit = (raw: unknown) => {
+    const x = raw as { id?: unknown; what?: unknown; why?: unknown };
+    if (typeof x?.id === "string" && typeof x.what === "string" && typeof x.why === "string")
+      h.onStep(x.id, x.what.trim().slice(0, 600), x.why.trim().slice(0, 600));
+  };
+  const text = await streamJson(ai, messages, TOUR_SCHEMA, maxTokens, (buf) => {
+    const s = scanPartial(buf, "steps", "intro");
+    if (!introSent && s.replyDone && s.reply) {
+      introSent = true;
+      h.onIntro(s.reply.trim());
+    }
+    while (emitted < s.ops.length) {
+      try {
+        emit(JSON.parse(s.ops[emitted]!));
+      } catch {
+        /* malformed item; the box gets fallback text */
+      }
+      emitted++;
+    }
+  });
+  const final = parseJson(text) as { intro?: unknown; steps?: unknown; outro?: unknown } | null;
+  if (!introSent && typeof final?.intro === "string") h.onIntro(final.intro.trim());
+  if (Array.isArray(final?.steps)) for (const raw of final.steps.slice(emitted)) emit(raw);
+  return typeof final?.outro === "string" ? final.outro.trim() : "";
 }
 
 export async function transcribe(ai: Ai, audio: ArrayBuffer): Promise<string> {

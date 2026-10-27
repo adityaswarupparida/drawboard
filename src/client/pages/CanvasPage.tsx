@@ -7,6 +7,7 @@ import { Board } from "../canvas/Board";
 import { ShareDialog } from "../canvas/ShareDialog";
 import { SidePanel } from "../canvas/SidePanel";
 import { useCanvas } from "../canvas/useCanvas";
+import { useTour, WalkthroughCard } from "../canvas/Walkthrough";
 import { useUser } from "../components/RequireAuth";
 import { Dialog } from "../components/ui";
 import { Logo } from "../icons";
@@ -37,6 +38,8 @@ export function CanvasPage() {
   );
 }
 
+const EMPTY = { nodes: [], edges: [] };
+
 function CanvasView({ project, reload }: { project: ProjectDetail; reload: () => void }) {
   const user = useUser();
   const live = useCanvas(project.id);
@@ -48,6 +51,7 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
   // The server decides the role; until it says hello, fall back to what the API reported.
   const role = me?.role ?? project.role;
   const canEdit = roleCanEdit(role);
+  const tour = useTour(live.tour, live.setTour, send, state?.diagram ?? EMPTY);
 
   useEffect(() => {
     document.title = `${project.name} · Drawboard`;
@@ -94,6 +98,15 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
           ))}
           <span className="pp ai" title="Drawboard AI">AI</span>
         </div>
+        <button
+          className="btn"
+          type="button"
+          disabled={!state?.diagram.nodes.length || !connected}
+          onClick={tour.start}
+          title="Step through the design box by box, with a plain-language explanation of each"
+        >
+          Walkthrough
+        </button>
         {canEdit && (
           <button
             className="btn"
@@ -132,6 +145,9 @@ function CanvasView({ project, reload }: { project: ProjectDetail; reload: () =>
             remoteDrags={live.remoteDrags}
             selNodes={selNodes}
             setSelNodes={setSelNodes}
+            tourFocus={tour.focus}
+            onNodeClick={(id) => tour.active && tour.jumpTo(id)}
+            overlay={tour.active && <WalkthroughCard ctl={tour} diagram={state.diagram} projectId={project.id} showToast={live.showToast} />}
           />
           <SidePanel
             projectId={project.id}

@@ -1,11 +1,12 @@
-// Hand-rolled because the JSON is still being written: yields each complete `ops` item (raw text) and the `reply` so far.
+// Hand-rolled because the JSON is still being written: yields each complete item of the top-level
+// `arrayKey` array (raw text) and the `textKey` string so far.
 export interface PartialScan {
   ops: string[];
   reply: string | null;
   replyDone: boolean;
 }
 
-export function scanPartial(buf: string): PartialScan {
+export function scanPartial(buf: string, arrayKey = "ops", textKey = "reply"): PartialScan {
   const ops: string[] = [];
   let reply: string | null = null;
   let replyDone = false;
@@ -53,7 +54,7 @@ export function scanPartial(buf: string): PartialScan {
       case '"':
         inString = true;
         stringStart = i;
-        if (depth === 1 && !expectKey && lastKey === "reply") {
+        if (depth === 1 && !expectKey && lastKey === textKey) {
           readingReply = true;
           replyRaw = "";
         }
@@ -65,7 +66,7 @@ export function scanPartial(buf: string): PartialScan {
         break;
       case "[":
         depth++;
-        if (depth === 2 && lastKey === "ops") opsArrayDepth = 2;
+        if (depth === 2 && lastKey === arrayKey) opsArrayDepth = 2;
         break;
       case "}":
         if (opsArrayDepth !== -1 && depth === opsArrayDepth + 1 && itemStart >= 0) {
